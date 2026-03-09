@@ -13,6 +13,10 @@ router.post('/login', async (req, res) => {
     const match = await bcrypt.compare(password, admin.password);
     if (!match) return res.status(400).json({ message: 'Invalid credentials' });
 
+    if (!process.env.JWT_SECRET) {
+      return res.status(500).json({ message: 'Server auth configuration missing (JWT_SECRET)' });
+    }
+
     const token = jwt.sign({ id: admin._id, name: admin.name, email: admin.email, role: admin.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
     await AuditLog.create({ action: 'Admin Login', admin: admin.name, ip: req.ip });
