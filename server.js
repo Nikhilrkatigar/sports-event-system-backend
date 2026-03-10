@@ -42,6 +42,7 @@ app.use('/api/gallery', require('./routes/gallery'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/audit', require('./routes/audit'));
 app.use('/api/users', require('./routes/users'));
+app.use('/api/tournaments', require('./routes/tournaments'));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 
 // MongoDB Connection

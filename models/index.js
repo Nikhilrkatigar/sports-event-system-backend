@@ -95,4 +95,30 @@ const auditSchema = new mongoose.Schema({
 });
 const AuditLog = mongoose.model('AuditLog', auditSchema);
 
-module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog };
+// Tournament Match
+const tournamentMatchSchema = new mongoose.Schema({
+  eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true },
+  tournamentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tournament', required: true },
+  round: { type: Number, required: true },
+  matchNumber: { type: Number, required: true },
+  participant1: { type: String, default: null },
+  participant2: { type: String, default: null },
+  score1: { type: Number, default: null },
+  score2: { type: Number, default: null },
+  winner: { type: String, default: null },
+  status: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
+  scheduledTime: { type: Date, default: null }
+});
+const TournamentMatch = mongoose.model('TournamentMatch', tournamentMatchSchema);
+
+// Tournament
+const tournamentSchema = new mongoose.Schema({
+  eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true, unique: true },
+  format: { type: String, enum: ['single_elimination', 'round_robin'], required: true },
+  participants: [{ type: String }],
+  status: { type: String, enum: ['draft', 'in_progress', 'completed'], default: 'draft' },
+  createdAt: { type: Date, default: Date.now }
+});
+const Tournament = mongoose.model('Tournament', tournamentSchema);
+
+module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog, Tournament, TournamentMatch };
