@@ -26,6 +26,7 @@ const eventSchema = new mongoose.Schema({
   maxParticipants: Number,
   date: Date,
   image: String,
+  registrationOpen: { type: Boolean, default: true },
   createdAt: { type: Date, default: Date.now }
 });
 const Event = mongoose.model('Event', eventSchema);

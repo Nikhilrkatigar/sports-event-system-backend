@@ -17,6 +17,7 @@ router.post('/', async (req, res) => {
     const { eventId, players } = req.body;
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
+    if (event.registrationOpen === false) return res.status(400).json({ message: 'Registration is closed for this event' });
 
     if (!Array.isArray(players) || players.length === 0) {
       return res.status(400).json({ message: 'At least one player is required' });

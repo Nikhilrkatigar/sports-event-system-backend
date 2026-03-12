@@ -71,6 +71,21 @@ router.put('/:id', auth, requireFullAccess, upload.single('image'), async (req, 
   }
 });
 
+// Admin: Toggle registration open/closed
+router.patch('/:id/toggle-registration', auth, requireFullAccess, async (req, res) => {
+  try {
+    const event = await Event.findById(req.params.id);
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+    event.registrationOpen = !event.registrationOpen;
+    await event.save();
+    const status = event.registrationOpen ? 'opened' : 'closed';
+    await AuditLog.create({ action: `Registration ${status}: ${event.title}`, admin: req.admin.name, ip: req.ip });
+    res.json(event);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Admin: Delete event
 router.delete('/:id', auth, requireFullAccess, async (req, res) => {
   try {
