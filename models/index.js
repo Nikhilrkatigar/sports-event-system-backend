@@ -20,6 +20,7 @@ const Admin = mongoose.model('Admin', adminSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   type: { type: String, enum: ['single', 'team'], required: true },
+  scoreOrder: { type: String, enum: ['asc', 'desc'], default: 'desc' },
   teamSize: { type: Number, default: 1 },
   description: String,
   rules: String,

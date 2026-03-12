@@ -298,6 +298,7 @@ router.get('/export/excel', auth, async (req, res) => {
 
     res.setHeader('Content-Disposition', `attachment; filename="Participants.xlsx"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.send(buffer);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -339,6 +340,7 @@ router.get('/export/event/:eventId', auth, async (req, res) => {
     const filename = `${event.title.replace(/\s+/g, '_')}_Participants.xlsx`;
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.send(buffer);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -364,6 +366,7 @@ router.get('/export/csv', auth, async (req, res) => {
 
     res.setHeader('Content-Disposition', 'attachment; filename="registrations.csv"');
     res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
     res.send(csv);
   } catch (err) {
     res.status(500).json({ message: err.message });
