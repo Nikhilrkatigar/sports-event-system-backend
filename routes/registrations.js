@@ -5,6 +5,22 @@ const { Application, Event, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requireFullAccess = require('../middleware/requireFullAccess');
 
+const ALLOWED_GENDERS = new Set(['male', 'female', 'unspecified']);
+const normalizeGender = (value) => {
+  const v = String(value || '').trim().toLowerCase();
+  if (!v) return '';
+  if (v === 'm') return 'male';
+  if (v === 'f') return 'female';
+  if (v === 'u' || v === 'unknown' || v === 'unspecified' || v === 'prefer_not_say') return 'unspecified';
+  return v;
+};
+const formatGender = (value) => {
+  const v = String(value || '').toLowerCase();
+  if (v === 'male') return 'Male';
+  if (v === 'female') return 'Female';
+  return 'Unspecified';
+};
+
 // Helper: generate team ID
 const generateTeamId = (eventTitle, count) => {
   const prefix = eventTitle.replace(/\s+/g, '').substring(0, 3).toUpperCase();
@@ -23,14 +39,23 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'At least one player is required' });
     }
 
-    const normalizedPlayers = players.map((player) => ({
-      name: player.name,
-      uucms: player.uucms,
-      phone: player.phone,
-      department: player.department,
-      isSubstitute: Boolean(player.isSubstitute),
-      isTeamLeader: Boolean(player.isTeamLeader)
-    }));
+    const normalizedPlayers = [];
+    for (let i = 0; i < players.length; i++) {
+      const player = players[i];
+      const gender = normalizeGender(player.gender);
+      if (!gender || !ALLOWED_GENDERS.has(gender) || gender === 'unspecified') {
+        return res.status(400).json({ message: `Gender is required for Player ${i + 1}` });
+      }
+      normalizedPlayers.push({
+        name: player.name,
+        uucms: player.uucms,
+        phone: player.phone,
+        department: player.department,
+        gender,
+        isSubstitute: Boolean(player.isSubstitute),
+        isTeamLeader: Boolean(player.isTeamLeader)
+      });
+    }
 
     const mainPlayers = normalizedPlayers.filter(p => !p.isSubstitute);
     if (mainPlayers.length === 0) {
@@ -252,6 +277,29 @@ router.post('/checkin/scan', auth, async (req, res) => {
   }
 });
 
+// Admin: Update player gender
+router.patch('/:id/players/:playerId', auth, async (req, res) => {
+  try {
+    const gender = normalizeGender(req.body.gender);
+    if (!gender || !ALLOWED_GENDERS.has(gender)) {
+      return res.status(400).json({ message: 'Invalid gender value' });
+    }
+
+    const application = await Application.findById(req.params.id);
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+
+    const player = application.players.id(req.params.playerId);
+    if (!player) return res.status(404).json({ message: 'Player not found' });
+
+    player.gender = gender;
+    await application.save();
+
+    res.json({ message: 'Player updated', player });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Admin: Delete registration
 router.delete('/:id', auth, async (req, res) => {
   try {
@@ -283,6 +331,7 @@ router.get('/export/excel', auth, async (req, res) => {
           'UUCMS Number': player.uucms,
           Phone: player.phone,
           Department: player.department,
+          Gender: formatGender(player.gender),
           Role: player.isTeamLeader ? 'Leader' : player.isSubstitute ? 'Substitute' : 'Player',
           'Check-In': player.checkInStatus ? 'Yes' : 'No',
           Substitute: player.isSubstitute ? 'Yes' : 'No',
@@ -325,6 +374,7 @@ router.get('/export/event/:eventId', auth, async (req, res) => {
         row['UUCMS Number'] = player.uucms;
         row['Phone'] = player.phone;
         row['Department'] = player.department;
+        row['Gender'] = formatGender(player.gender);
         row['Role'] = player.isTeamLeader ? 'Leader' : player.isSubstitute ? 'Substitute' : 'Player';
         row['Check-In'] = player.checkInStatus ? 'Yes' : 'No';
         if (event.type === 'team') row['Substitute'] = player.isSubstitute ? 'Yes' : 'No';
@@ -355,12 +405,12 @@ router.get('/export/csv', auth, async (req, res) => {
     if (eventId) query.eventId = eventId;
 
     const applications = await Application.find(query).populate('eventId', 'title');
-    let csv = 'Event,Team ID,Team Name,Player Name,UUCMS Number,Phone,Department,Role,Check-In,Registration Date\n';
+    let csv = 'Event,Team ID,Team Name,Player Name,UUCMS Number,Phone,Department,Gender,Role,Check-In,Registration Date\n';
 
     for (const app of applications) {
       for (const player of app.players) {
         const role = player.isTeamLeader ? 'Leader' : player.isSubstitute ? 'Substitute' : 'Player';
-        csv += `"${app.eventId?.title || ''}","${app.teamId || 'N/A'}","${app.teamName || 'N/A'}","${player.name}","${player.uucms}","${player.phone}","${player.department}","${role}","${player.checkInStatus ? 'Yes' : 'No'}","${new Date(app.createdAt).toLocaleDateString()}"\n`;
+        csv += `"${app.eventId?.title || ''}","${app.teamId || 'N/A'}","${app.teamName || 'N/A'}","${player.name}","${player.uucms}","${player.phone}","${player.department}","${formatGender(player.gender)}","${role}","${player.checkInStatus ? 'Yes' : 'No'}","${new Date(app.createdAt).toLocaleDateString()}"\n`;
       }
     }
 

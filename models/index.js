@@ -38,6 +38,7 @@ const playerSchema = new mongoose.Schema({
   uucms: { type: String, required: true },
   phone: String,
   department: String,
+  gender: { type: String, enum: ['male', 'female', 'unspecified'], default: 'unspecified' },
   qrCode: String,
   checkInStatus: { type: Boolean, default: false },
   isSubstitute: { type: Boolean, default: false },
