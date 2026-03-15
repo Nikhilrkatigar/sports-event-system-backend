@@ -1,23 +1,23 @@
 const router = require('express').Router();
 const { Admin, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
-const requireFullAccess = require('../middleware/requireFullAccess');
-const { CMS_ROLES, isValidCmsRole } = require('../utils/roles');
+const requirePermission = require('../middleware/requirePermission');
+const { ROLE_DEFINITIONS, isValidCmsRole, getCanonicalRole } = require('../utils/roles');
 
-router.get('/roles', auth, requireFullAccess, (req, res) => {
-  res.json(CMS_ROLES);
+router.get('/roles', auth, requirePermission('manage_users'), (req, res) => {
+  res.json(ROLE_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })));
 });
 
-router.get('/', auth, requireFullAccess, async (req, res) => {
+router.get('/', auth, requirePermission('manage_users'), async (req, res) => {
   try {
-    const users = await Admin.find().select('-password').sort({ createdAt: -1 });
-    res.json(users);
+    const users = await Admin.find().select('-password').sort({ createdAt: -1 }).lean();
+    res.json(users.map((user) => ({ ...user, role: getCanonicalRole(user.role) })));
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
 });
 
-router.post('/', auth, requireFullAccess, async (req, res) => {
+router.post('/', auth, requirePermission('manage_users'), async (req, res) => {
   try {
     const { name, email, password, role } = req.body;
     if (!name || !email || !password || !role) {
@@ -36,7 +36,7 @@ router.post('/', auth, requireFullAccess, async (req, res) => {
       name: String(name).trim(),
       email: String(email).trim().toLowerCase(),
       password: String(password),
-      role
+      role: getCanonicalRole(role)
     });
     await user.save();
 
@@ -46,8 +46,8 @@ router.post('/', auth, requireFullAccess, async (req, res) => {
       ip: req.ip
     });
 
-    const safeUser = await Admin.findById(user._id).select('-password');
-    res.status(201).json(safeUser);
+    const safeUser = await Admin.findById(user._id).select('-password').lean();
+    res.status(201).json({ ...safeUser, role: getCanonicalRole(safeUser.role) });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

@@ -1,9 +1,9 @@
 const router = require('express').Router();
 const { AuditLog } = require('../models');
 const auth = require('../middleware/auth');
-const requireFullAccess = require('../middleware/requireFullAccess');
+const requirePermission = require('../middleware/requirePermission');
 
-router.get('/', auth, requireFullAccess, async (req, res) => {
+router.get('/', auth, requirePermission('view_audit'), async (req, res) => {
   try {
     const logs = await AuditLog.find().sort({ timestamp: -1 }).limit(200);
     res.json(logs);

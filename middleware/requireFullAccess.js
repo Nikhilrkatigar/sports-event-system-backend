@@ -1,8 +1,3 @@
-const { hasFullCmsAccess } = require('../utils/roles');
+const requirePermission = require('./requirePermission');
 
-module.exports = (req, res, next) => {
-  if (!hasFullCmsAccess(req.admin?.role)) {
-    return res.status(403).json({ message: 'You do not have permission to access this resource' });
-  }
-  return next();
-};
+module.exports = requirePermission('manage_users');

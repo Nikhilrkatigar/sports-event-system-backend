@@ -20,14 +20,24 @@ const Admin = mongoose.model('Admin', adminSchema);
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   type: { type: String, enum: ['single', 'team'], required: true },
+  status: {
+    type: String,
+    enum: ['draft', 'coming_soon', 'published', 'open', 'full', 'live', 'completed', 'archived'],
+    default: 'draft'
+  },
   scoreOrder: { type: String, enum: ['asc', 'desc'], default: 'desc' },
   teamSize: { type: Number, default: 1 },
   description: String,
   rules: String,
   maxParticipants: Number,
   date: Date,
+  registrationDeadline: Date,
   image: String,
   registrationOpen: { type: Boolean, default: true },
+  // Social features
+  likes: { type: [String], default: [] },
+  interested: { type: [String], default: [] },
+  shares: { type: Number, default: 0 },
   createdAt: { type: Date, default: Date.now }
 });
 const Event = mongoose.model('Event', eventSchema);
@@ -99,18 +109,28 @@ const auditSchema = new mongoose.Schema({
 const AuditLog = mongoose.model('AuditLog', auditSchema);
 
 // Tournament Match
+const tournamentParticipantSchema = new mongoose.Schema({
+  applicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
+  label: { type: String, required: true },
+  isBye: { type: Boolean, default: false }
+}, { _id: false });
+
 const tournamentMatchSchema = new mongoose.Schema({
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true },
   tournamentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tournament', required: true },
   round: { type: Number, required: true },
   matchNumber: { type: Number, required: true },
+  participant1Id: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
+  participant2Id: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
   participant1: { type: String, default: null },
   participant2: { type: String, default: null },
   score1: { type: Number, default: null },
   score2: { type: Number, default: null },
+  winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
   winner: { type: String, default: null },
   status: { type: String, enum: ['pending', 'in_progress', 'completed'], default: 'pending' },
-  scheduledTime: { type: Date, default: null }
+  scheduledTime: { type: Date, default: null },
+  updatedAt: { type: Date, default: Date.now }
 });
 const TournamentMatch = mongoose.model('TournamentMatch', tournamentMatchSchema);
 
@@ -118,8 +138,11 @@ const TournamentMatch = mongoose.model('TournamentMatch', tournamentMatchSchema)
 const tournamentSchema = new mongoose.Schema({
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true, unique: true },
   format: { type: String, enum: ['single_elimination', 'round_robin'], required: true },
-  participants: [{ type: String }],
+  participants: [tournamentParticipantSchema],
   status: { type: String, enum: ['draft', 'in_progress', 'completed'], default: 'draft' },
+  // Social features
+  likes: { type: [String], default: [] },
+  interested: { type: [String], default: [] },
   createdAt: { type: Date, default: Date.now }
 });
 const Tournament = mongoose.model('Tournament', tournamentSchema);

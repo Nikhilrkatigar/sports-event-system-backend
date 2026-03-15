@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { Gallery } = require('../models');
 const auth = require('../middleware/auth');
-const requireFullAccess = require('../middleware/requireFullAccess');
+const requirePermission = require('../middleware/requirePermission');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -23,7 +23,7 @@ router.get('/', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.post('/', auth, requireFullAccess, upload.single('image'), async (req, res) => {
+router.post('/', auth, requirePermission('manage_gallery'), upload.single('image'), async (req, res) => {
   try {
     const data = { caption: req.body.caption };
     if (req.file) data.image = `/uploads/gallery/${req.file.filename}`;
@@ -34,7 +34,7 @@ router.post('/', auth, requireFullAccess, upload.single('image'), async (req, re
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.delete('/:id', auth, requireFullAccess, async (req, res) => {
+router.delete('/:id', auth, requirePermission('manage_gallery'), async (req, res) => {
   try {
     await Gallery.findByIdAndDelete(req.params.id);
     res.json({ message: 'Deleted' });

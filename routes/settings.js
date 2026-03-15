@@ -4,7 +4,7 @@ const path = require('path');
 const fs = require('fs');
 const { Settings, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
-const requireFullAccess = require('../middleware/requireFullAccess');
+const requirePermission = require('../middleware/requirePermission');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -24,7 +24,7 @@ router.get('/', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.put('/', auth, requireFullAccess, upload.single('collegeLogo'), async (req, res) => {
+router.put('/', auth, requirePermission('manage_settings'), upload.single('collegeLogo'), async (req, res) => {
   try {
     const data = { ...req.body };
     if (typeof data.departments === 'string') {

@@ -1,6 +1,7 @@
 const router = require('express').Router();
 const { Leaderboard, Event } = require('../models');
 const auth = require('../middleware/auth');
+const requirePermission = require('../middleware/requirePermission');
 
 const resolveScoreOrder = async (eventId) => {
   if (!eventId) return 'desc';
@@ -15,12 +16,22 @@ const recalcRanks = async (eventId) => {
   const entries = await Leaderboard.find({ eventId }).sort({ score: sortDir, _id: 1 });
   if (entries.length === 0) return;
 
-  const ops = entries.map((entry, index) => ({
-    updateOne: {
-      filter: { _id: entry._id },
-      update: { rank: index + 1 }
-    }
-  }));
+  let previousScore = null;
+  let previousRank = 0;
+
+  const ops = entries.map((entry, index) => {
+    const currentScore = Number(entry.score);
+    const rank = previousScore !== null && currentScore === previousScore ? previousRank : index + 1;
+    previousScore = currentScore;
+    previousRank = rank;
+
+    return {
+      updateOne: {
+        filter: { _id: entry._id },
+        update: { rank }
+      }
+    };
+  });
   await Leaderboard.bulkWrite(ops);
 };
 
@@ -31,7 +42,7 @@ router.get('/', async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.post('/', auth, async (req, res) => {
+router.post('/', auth, requirePermission('manage_leaderboard'), async (req, res) => {
   try {
     const { eventId, teamOrPlayer, score } = req.body;
     if (!eventId || !teamOrPlayer || score === undefined || score === null || score === '') {
@@ -44,7 +55,7 @@ router.post('/', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.put('/:id', auth, async (req, res) => {
+router.put('/:id', auth, requirePermission('manage_leaderboard'), async (req, res) => {
   try {
     const existing = await Leaderboard.findById(req.params.id);
     if (!existing) return res.status(404).json({ message: 'Entry not found' });
@@ -58,7 +69,7 @@ router.put('/:id', auth, async (req, res) => {
   } catch (err) { res.status(500).json({ message: err.message }); }
 });
 
-router.delete('/:id', auth, async (req, res) => {
+router.delete('/:id', auth, requirePermission('manage_leaderboard'), async (req, res) => {
   try {
     const existing = await Leaderboard.findById(req.params.id);
     if (!existing) return res.status(404).json({ message: 'Entry not found' });
