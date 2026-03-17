@@ -188,6 +188,23 @@ router.post('/', async (req, res) => {
       if (leaderCount !== 1) {
         return res.status(400).json({ message: 'Please select exactly one team leader' });
       }
+      
+      // Check gender composition requirements
+      if (event.maleRequired > 0 || event.femaleRequired > 0) {
+        const maleCount = mainPlayers.filter((player) => player.gender === 'male').length;
+        const femaleCount = mainPlayers.filter((player) => player.gender === 'female').length;
+        
+        if (maleCount < event.maleRequired) {
+          return res.status(400).json({ 
+            message: `This event requires at least ${event.maleRequired} male player(s). You have ${maleCount}.` 
+          });
+        }
+        if (femaleCount < event.femaleRequired) {
+          return res.status(400).json({ 
+            message: `This event requires at least ${event.femaleRequired} female player(s). You have ${femaleCount}.` 
+          });
+        }
+      }
     } else {
       if (mainPlayers.length !== 1) {
         return res.status(400).json({ message: 'Single events accept exactly one participant' });
@@ -297,6 +314,61 @@ router.get('/public/:id', async (req, res) => {
     const app = await Application.findById(req.params.id).populate('eventId', 'title');
     if (!app) return res.status(404).json({ message: 'Registration not found' });
     res.json(app);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Public: Get Team/Player Profile by Display Name
+router.get('/public/profile/:name', async (req, res) => {
+  try {
+    const name = req.params.name;
+    // Find all applications where this name is the team name or the main player's name
+    const apps = await Application.find({
+      $or: [
+        { teamName: name },
+        { teamId: name },
+        { 'players.0.name': name } 
+      ]
+    }).populate('eventId', 'title type date');
+
+    if (!apps || apps.length === 0) {
+      return res.status(404).json({ message: 'Profile not found' });
+    }
+
+    // Since a player/team might have registered for multiple events, we aggregate their profile
+    const profile = {
+      name: name,
+      events: [],
+      players: [],
+      totalPoints: 0
+    };
+
+    // Use the first found app for the master roster list to show on the profile
+    const masterApp = apps.find(a => a.teamName === name) || apps[0];
+    profile.players = masterApp.players.map(p => ({
+      name: p.name,
+      department: p.department,
+      role: p.isTeamLeader ? 'Leader' : (p.isSubstitute ? 'Substitute' : 'Player')
+    }));
+
+    for (const app of apps) {
+      if (app.eventId) {
+        profile.events.push({
+          eventId: app.eventId._id,
+          title: app.eventId.title,
+          type: app.eventId.type,
+          date: app.eventId.date
+        });
+      }
+    }
+
+    // Get total points from Leaderboard
+    const leaderboardEntries = await Leaderboard.find({ teamOrPlayer: name });
+    profile.totalPoints = leaderboardEntries.reduce((sum, entry) => sum + (entry.score || 0), 0);
+    profile.leaderboardRanks = leaderboardEntries.map(e => ({ eventId: e.eventId, rank: e.rank, score: e.score }));
+
+    res.json(profile);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

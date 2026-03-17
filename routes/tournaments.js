@@ -60,6 +60,26 @@ router.get('/event/:eventId', async (req, res) => {
   }
 });
 
+// Public: Get all LIVE (in-progress) matches across all tournaments
+router.get('/live', async (req, res) => {
+  try {
+    const liveMatches = await TournamentMatch.find({ status: 'in_progress' })
+      .populate({
+        path: 'tournamentId',
+        select: 'format status',
+        populate: { path: 'eventId', select: 'title type' }
+      })
+      .sort({ updatedAt: -1 })
+      .limit(10);
+    
+    // Filter out matches where the event pop failed (just in case event was deleted)
+    const validLive = liveMatches.filter(m => m.tournamentId && m.tournamentId.eventId);
+    res.json(validLive);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Admin: Generate bracket from registrations
 router.post('/generate', auth, requirePermission('manage_tournaments'), async (req, res) => {
   try {
@@ -217,11 +237,19 @@ function generateSingleElimination(tournament, participants, eventId) {
   const totalSlots = nextPowerOf2(n);
   const totalRounds = Math.log2(totalSlots);
 
-  const seeded = [...participants];
+  // Randomize the participants so matchups are completely fair and random
+  const shuffledParticipants = [...participants];
+  for (let i = shuffledParticipants.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [shuffledParticipants[i], shuffledParticipants[j]] = [shuffledParticipants[j], shuffledParticipants[i]];
+  }
+
+  const seeded = [...shuffledParticipants];
   while (seeded.length < totalSlots) {
     seeded.push(buildByeParticipant());
   }
 
+  // Shuffle again after adding Byes so that Byes are randomly distributed
   for (let i = seeded.length - 1; i > 0; i--) {
     const j = Math.floor(Math.random() * (i + 1));
     [seeded[i], seeded[j]] = [seeded[j], seeded[i]];

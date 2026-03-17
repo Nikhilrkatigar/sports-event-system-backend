@@ -31,9 +31,13 @@ const eventSchema = new mongoose.Schema({
   rules: String,
   maxParticipants: Number,
   date: Date,
+  startTime: String,
   registrationDeadline: Date,
   image: String,
   registrationOpen: { type: Boolean, default: true },
+  // Gender composition requirements
+  maleRequired: { type: Number, default: 0 },
+  femaleRequired: { type: Number, default: 0 },
   // Social features
   likes: { type: [String], default: [] },
   interested: { type: [String], default: [] },
@@ -92,6 +96,9 @@ const settingsSchema = new mongoose.Schema({
   eventDate: Date,
   venue: String,
   description: String,
+  homeNotice: String,
+  announcementText: { type: String, default: '' },
+  announcementActive: { type: Boolean, default: false },
   departments: {
     type: [String],
     default: ['BCA', 'MCA', 'BBA', 'MBA', 'B.Com', 'B.Sc', 'B.Tech', 'M.Tech', 'BA', 'MA', 'B.Ed', 'Other']
@@ -147,4 +154,17 @@ const tournamentSchema = new mongoose.Schema({
 });
 const Tournament = mongoose.model('Tournament', tournamentSchema);
 
-module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog, Tournament, TournamentMatch };
+// Timeline Item
+const timelineItemSchema = new mongoose.Schema({
+  time: { type: String, required: true },          // e.g. "10:00 AM"
+  title: { type: String, required: true },
+  description: { type: String, default: '' },
+  icon: { type: String, default: '🏆' },           // emoji icon
+  color: { type: String, default: '#3b82f6' },     // accent color
+  isPublic: { type: Boolean, default: true },
+  order: { type: Number, default: 0 },
+  createdAt: { type: Date, default: Date.now }
+});
+const TimelineItem = mongoose.model('TimelineItem', timelineItemSchema);
+
+module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog, Tournament, TournamentMatch, TimelineItem };
