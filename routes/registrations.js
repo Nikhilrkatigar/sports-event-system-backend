@@ -180,6 +180,19 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'At least one main player is required' });
     }
 
+    // Check department restrictions
+    if (Array.isArray(event.allowedDepartments) && event.allowedDepartments.length > 0) {
+      const invalidDepts = mainPlayers
+        .filter(p => !event.allowedDepartments.includes(p.department))
+        .map(p => p.department);
+      
+      if (invalidDepts.length > 0) {
+        return res.status(400).json({ 
+          message: `This event is only open for: ${event.allowedDepartments.join(', ')}. Students from ${invalidDepts.join(', ')} cannot register.` 
+        });
+      }
+    }
+
     if (event.type === 'team') {
       if (mainPlayers.length !== Number(event.teamSize || 1)) {
         return res.status(400).json({ message: `Exactly ${event.teamSize} main players are required for this event` });
@@ -290,13 +303,15 @@ router.post('/', async (req, res) => {
 // Admin: Get all registrations
 router.get('/', auth, requirePermission('view_registrations'), async (req, res) => {
   try {
-    const { eventId, search, attendance } = req.query;
+    const { eventId, search, attendance, dept, gender } = req.query;
     const query = {};
 
     if (eventId) query.eventId = eventId;
     if (search) Object.assign(query, buildSearchQuery(search));
     if (attendance === 'pending') query['players.checkInStatus'] = false;
     if (attendance === 'checked_in') query['players.checkInStatus'] = true;
+    if (dept) query['players.department'] = dept;
+    if (gender) query['players.gender'] = gender;
 
     const applications = await Application.find(query)
       .populate('eventId', 'title type status')

@@ -38,6 +38,8 @@ const eventSchema = new mongoose.Schema({
   // Gender composition requirements
   maleRequired: { type: Number, default: 0 },
   femaleRequired: { type: Number, default: 0 },
+  // Department restrictions (empty means all departments allowed)
+  allowedDepartments: { type: [String], default: [] },
   // Social features
   likes: { type: [String], default: [] },
   interested: { type: [String], default: [] },
@@ -96,6 +98,7 @@ const settingsSchema = new mongoose.Schema({
   eventDate: Date,
   venue: String,
   description: String,
+  announcement: { type: String, default: '' },
   homeNotice: String,
   announcementText: { type: String, default: '' },
   announcementActive: { type: Boolean, default: false },
@@ -167,4 +170,14 @@ const timelineItemSchema = new mongoose.Schema({
 });
 const TimelineItem = mongoose.model('TimelineItem', timelineItemSchema);
 
-module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog, Tournament, TournamentMatch, TimelineItem };
+// Messages / Admin Announcements
+const messageSchema = new mongoose.Schema({
+  adminName: { type: String, required: true },
+  adminId: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin', required: true },
+  message: { type: String, required: true },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now }
+});
+const Message = mongoose.model('Message', messageSchema);
+
+module.exports = { Admin, Event, Application, Gallery, Leaderboard, Settings, AuditLog, Tournament, TournamentMatch, TimelineItem, Message };
