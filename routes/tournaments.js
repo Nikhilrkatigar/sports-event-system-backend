@@ -83,7 +83,7 @@ router.get('/live', async (req, res) => {
 // Admin: Generate bracket from registrations
 router.post('/generate', auth, requirePermission('manage_tournaments'), async (req, res) => {
   try {
-    const { eventId, format } = req.body;
+    const { eventId, format, genderFilter } = req.body;
     if (!eventId || !format) {
       return res.status(400).json({ message: 'Event ID and format are required' });
     }
@@ -99,9 +99,26 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
       return res.status(400).json({ message: 'A tournament already exists for this event. Delete it first to regenerate.' });
     }
 
-    const applications = await Application.find({ eventId }).sort({ createdAt: 1 });
+    let applications = await Application.find({ eventId }).sort({ createdAt: 1 });
+    
+    // Filter applications by event's gender restrictions
+    if (Array.isArray(event.allowedGenders) && event.allowedGenders.length > 0) {
+      applications = applications.filter((application) => {
+        const mainPlayers = application.players.filter((player) => !player.isSubstitute);
+        return mainPlayers.every((player) => event.allowedGenders.includes(player.gender));
+      });
+    }
+
+    // Filter applications by admin-selected gender filter (if specified)
+    if (genderFilter && ['male', 'female'].includes(genderFilter)) {
+      applications = applications.filter((application) => {
+        const mainPlayers = application.players.filter((player) => !player.isSubstitute);
+        return mainPlayers.every((player) => player.gender === genderFilter);
+      });
+    }
+    
     if (applications.length < 2) {
-      return res.status(400).json({ message: 'At least 2 registrations are required to generate a bracket' });
+      return res.status(400).json({ message: 'At least 2 registrations are required to generate a bracket. Check gender filter and event restrictions.' });
     }
 
     const participants = applications.map((application) => buildParticipantPayload(event, application));

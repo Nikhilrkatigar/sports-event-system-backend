@@ -38,8 +38,14 @@ const eventSchema = new mongoose.Schema({
   // Gender composition requirements
   maleRequired: { type: Number, default: 0 },
   femaleRequired: { type: Number, default: 0 },
+  // Gender participation restrictions (empty means all genders allowed)
+  allowedGenders: { type: [String], enum: ['male', 'female'], default: ['male', 'female'] },
   // Department restrictions (empty means all departments allowed)
   allowedDepartments: { type: [String], default: [] },
+  // Payment
+  registrationFee: { type: Number, default: 0 },
+  upiPaymentLink: { type: String, default: '' },
+  paymentQRCode: { type: String, default: '' },
   // Social features
   likes: { type: [String], default: [] },
   interested: { type: [String], default: [] },
@@ -68,6 +74,11 @@ const applicationSchema = new mongoose.Schema({
   teamName: String,
   qrCode: String,
   players: [playerSchema],
+  paymentStatus: { type: String, enum: ['pending', 'paid', 'free'], default: 'pending' },
+  paymentVerifiedAt: { type: Date },
+  verifiedByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
+  paymentScreenshot: { type: String, default: '' },
+  paymentScreenshotUploadedAt: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
 const Application = mongoose.model('Application', applicationSchema);

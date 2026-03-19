@@ -20,6 +20,10 @@ const storage = multer.diskStorage({
   filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
 const upload = multer({ storage });
+const uploadFields = upload.fields([
+  { name: 'image', maxCount: 1 },
+  { name: 'paymentQRCode', maxCount: 1 }
+]);
 
 const getEventCounts = async (eventIds) => {
   if (!Array.isArray(eventIds) || eventIds.length === 0) return new Map();
@@ -89,10 +93,11 @@ router.get('/:id', async (req, res) => {
 });
 
 // Admin: Create event
-router.post('/', auth, requirePermission('manage_events'), upload.single('image'), async (req, res) => {
+router.post('/', auth, requirePermission('manage_events'), uploadFields, async (req, res) => {
   try {
     const data = getNormalizedEventPayload(req.body);
-    if (req.file) data.image = `/uploads/events/${req.file.filename}`;
+    if (req.files?.image?.[0]) data.image = `/uploads/events/${req.files.image[0].filename}`;
+    if (req.files?.paymentQRCode?.[0]) data.paymentQRCode = `/uploads/events/${req.files.paymentQRCode[0].filename}`;
     if (data.type !== 'team') data.teamSize = 1;
     const event = new Event(data);
     await event.save();
@@ -105,10 +110,11 @@ router.post('/', auth, requirePermission('manage_events'), upload.single('image'
 });
 
 // Admin: Update event
-router.put('/:id', auth, requirePermission('manage_events'), upload.single('image'), async (req, res) => {
+router.put('/:id', auth, requirePermission('manage_events'), uploadFields, async (req, res) => {
   try {
     const data = getNormalizedEventPayload(req.body);
-    if (req.file) data.image = `/uploads/events/${req.file.filename}`;
+    if (req.files?.image?.[0]) data.image = `/uploads/events/${req.files.image[0].filename}`;
+    if (req.files?.paymentQRCode?.[0]) data.paymentQRCode = `/uploads/events/${req.files.paymentQRCode[0].filename}`;
     if (data.type !== 'team') data.teamSize = 1;
     const event = await Event.findByIdAndUpdate(req.params.id, data, { new: true });
     if (!event) return res.status(404).json({ message: 'Event not found' });

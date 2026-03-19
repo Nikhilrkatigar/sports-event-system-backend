@@ -66,6 +66,22 @@ const getNormalizedEventPayload = (input = {}) => {
   if (payload.registrationDeadline === '') delete payload.registrationDeadline;
   if (payload.date === '') delete payload.date;
 
+  // Parse JSON arrays from FormData string representations
+  if (payload.allowedGenders && typeof payload.allowedGenders === 'string') {
+    try {
+      payload.allowedGenders = JSON.parse(payload.allowedGenders);
+    } catch {
+      payload.allowedGenders = [];
+    }
+  }
+  if (payload.allowedDepartments && typeof payload.allowedDepartments === 'string') {
+    try {
+      payload.allowedDepartments = JSON.parse(payload.allowedDepartments);
+    } catch {
+      payload.allowedDepartments = [];
+    }
+  }
+
   if (payload.status) {
     payload.registrationOpen = payload.status === 'open';
   }

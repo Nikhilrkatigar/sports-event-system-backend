@@ -1,6 +1,9 @@
 const router = require('express').Router();
 const XLSX = require('xlsx');
 const QRCode = require('qrcode');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
 const { Application, Event, AuditLog, Tournament, TournamentMatch, Leaderboard } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
@@ -9,6 +12,16 @@ const {
   getRegistrationState,
   syncEventRegistrationStatus
 } = require('../utils/events');
+
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const dir = 'uploads/payment-screenshots';
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+    cb(null, dir);
+  },
+  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
+});
+const upload = multer({ storage });
 
 const ALLOWED_GENDERS = new Set(['male', 'female', 'unspecified']);
 
@@ -193,6 +206,22 @@ router.post('/', async (req, res) => {
       }
     }
 
+    // Check gender participation restrictions
+    if (Array.isArray(event.allowedGenders) && event.allowedGenders.length > 0) {
+      const invalidGenders = mainPlayers
+        .filter(p => !event.allowedGenders.includes(p.gender))
+        .map(p => `${p.name} (${p.gender})`);
+      
+      if (invalidGenders.length > 0) {
+        const restriction = event.allowedGenders.length === 1 
+          ? `only ${event.allowedGenders[0]}s` 
+          : event.allowedGenders.join(' and ');
+        return res.status(400).json({ 
+          message: `This event is open for ${restriction} only. Cannot register: ${invalidGenders.join(', ')}.` 
+        });
+      }
+    }
+
     if (event.type === 'team') {
       if (mainPlayers.length !== Number(event.teamSize || 1)) {
         return res.status(400).json({ message: `Exactly ${event.teamSize} main players are required for this event` });
@@ -274,7 +303,8 @@ router.post('/', async (req, res) => {
       teamId,
       teamName: finalTeamName,
       qrCode: '',
-      players: playersWithStatus
+      players: playersWithStatus,
+      paymentStatus: event.registrationFee > 0 ? 'pending' : 'free'
     });
 
     const qrPayload = JSON.stringify({
@@ -294,7 +324,9 @@ router.post('/', async (req, res) => {
       playerCount: counts.playerCount + getMainPlayerCount(playersWithStatus)
     });
 
-    res.status(201).json(application);
+    // Populate eventId with payment details for response
+    const result = await Application.findById(application._id).populate('eventId', 'title type status registrationFee paymentQRCode upiPaymentLink');
+    res.status(201).json(result);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -743,6 +775,69 @@ router.get('/stats/overview', auth, requirePermission('view_dashboard'), async (
       openEvents,
       fullEvents
     });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Verify payment for a registration
+router.patch('/:id/verify-payment', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    const application = await Application.findByIdAndUpdate(
+      req.params.id,
+      {
+        paymentStatus: 'paid',
+        paymentVerifiedAt: new Date(),
+        verifiedByAdmin: req.admin.id
+      },
+      { new: true }
+    ).populate('eventId', 'title registrationFee');
+    
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+    res.json({ message: 'Payment verified successfully', data: application });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Mark payment as pending (undo verification)
+router.patch('/:id/unverify-payment', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    const application = await Application.findByIdAndUpdate(
+      req.params.id,
+      {
+        paymentStatus: 'pending',
+        paymentVerifiedAt: null,
+        verifiedByAdmin: null
+      },
+      { new: true }
+    ).populate('eventId', 'title registrationFee');
+    
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+    res.json({ message: 'Payment status reset', data: application });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// User: Upload payment screenshot proof
+router.patch('/:id/upload-payment-screenshot', auth, upload.single('screenshot'), async (req, res) => {
+  try {
+    const application = await Application.findById(req.params.id).populate('eventId', 'title registrationFee paymentQRCode upiPaymentLink');
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+    
+    if (!req.file) {
+      return res.status(400).json({ message: 'Payment screenshot file required' });
+    }
+
+    application.paymentScreenshot = `/uploads/payment-screenshots/${req.file.filename}`;
+    application.paymentScreenshotUploadedAt = new Date();
+    application.paymentStatus = 'pending';
+    await application.save();
+    
+    // Reload with populated eventId
+    const updated = await Application.findById(req.params.id).populate('eventId', 'title registrationFee paymentQRCode upiPaymentLink');
+    res.json({ message: 'Payment screenshot uploaded successfully', data: updated });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
