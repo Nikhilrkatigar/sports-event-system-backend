@@ -174,3 +174,55 @@ backend/
 ## Need Help?
 
 Check the seeding output for detailed messages about what was created or skipped. All operations are logged to console with emojis for easy reading.
+
+---
+
+## Database Migrations
+
+### UUCMS Uppercase Migration
+
+**Purpose:** All UUCMS (University Unique Code/Number) entries must be stored in UPPERCASE format for consistency and easy searching.
+
+**When to Run:**
+- After updating the code to the latest version
+- If you have existing registrations with lowercase UUCMS
+- To normalize data across the database
+
+**Running the Migration:**
+```bash
+cd backend
+node migrate-uucms.js
+```
+
+**What it does:**
+- Finds all registrations in the database
+- Converts any lowercase UUCMS to UPPERCASE
+- Logs each conversion for auditing
+- Shows summary of updates
+
+**Example Output:**
+```
+🚀 Starting UUCMS uppercase migration...
+
+✅ Connected to MongoDB
+
+📊 Found 150 registrations to check
+
+📝 Converting: John Doe | u02cg23s0001 → U02CG23S0001
+📝 Converting: Jane Smith | u02eb24c0050 → U02EB24C0050
+...
+
+═══════════════════════════════════════
+✅ Migration completed successfully!
+═══════════════════════════════════════
+
+📊 Summary:
+   Registrations updated: 45
+   Players updated: 78
+```
+
+**Automatic Enforcement:**
+- New registrations automatically convert UUCMS to UPPERCASE
+- Frontend input field shows real-time uppercase conversion
+- Backend enforces uppercase storage via pre-save hook
+

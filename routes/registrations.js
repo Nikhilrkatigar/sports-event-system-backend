@@ -541,9 +541,40 @@ router.post('/checkin/scan', auth, requirePermission('check_in'), async (req, re
 // Admin: Update player gender
 router.patch('/:id/players/:playerId', auth, requirePermission('manage_registrations'), async (req, res) => {
   try {
-    const gender = normalizeGender(req.body.gender);
-    if (!gender || !ALLOWED_GENDERS.has(gender)) {
-      return res.status(400).json({ message: 'Invalid gender value' });
+    const { gender, name, phone, uucms, department } = req.body;
+    const updates = {};
+
+    // Update gender if provided
+    if (gender) {
+      const normalizedGender = normalizeGender(gender);
+      if (!normalizedGender || !ALLOWED_GENDERS.has(normalizedGender)) {
+        return res.status(400).json({ message: 'Invalid gender value' });
+      }
+      updates.gender = normalizedGender;
+    }
+
+    // Update name if provided
+    if (name && typeof name === 'string' && name.trim()) {
+      updates.name = name.trim();
+    }
+
+    // Update phone if provided
+    if (phone && typeof phone === 'string') {
+      updates.phone = phone.trim();
+    }
+
+    // Update UUCMS if provided
+    if (uucms && typeof uucms === 'string') {
+      updates.uucms = normalizeUucms(uucms);
+    }
+
+    // Update department if provided
+    if (department && typeof department === 'string') {
+      updates.department = department.trim();
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: 'No valid fields to update' });
     }
 
     const application = await Application.findById(req.params.id);
@@ -552,7 +583,8 @@ router.patch('/:id/players/:playerId', auth, requirePermission('manage_registrat
     const player = application.players.id(req.params.playerId);
     if (!player) return res.status(404).json({ message: 'Player not found' });
 
-    player.gender = gender;
+    // Apply updates
+    Object.assign(player, updates);
     await application.save();
 
     res.json({ message: 'Player updated', player });

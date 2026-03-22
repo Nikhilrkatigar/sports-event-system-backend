@@ -81,6 +81,19 @@ const applicationSchema = new mongoose.Schema({
   paymentScreenshotUploadedAt: { type: Date },
   createdAt: { type: Date, default: Date.now }
 });
+
+// Pre-save hook to normalize UUCMS to uppercase
+applicationSchema.pre('save', function(next) {
+  if (this.players && Array.isArray(this.players)) {
+    this.players.forEach(player => {
+      if (player.uucms) {
+        player.uucms = String(player.uucms).trim().toUpperCase();
+      }
+    });
+  }
+  next();
+});
+
 const Application = mongoose.model('Application', applicationSchema);
 
 // Gallery
@@ -96,6 +109,8 @@ const leaderboardSchema = new mongoose.Schema({
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event' },
   teamOrPlayer: String,
   score: Number,
+  gender: { type: String, enum: ['male', 'female', 'unspecified'], default: 'unspecified' },
+  hype: { type: Number, default: 0 },
   rank: Number,
   updatedAt: { type: Date, default: Date.now }
 });
