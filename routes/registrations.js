@@ -875,4 +875,150 @@ router.patch('/:id/upload-payment-screenshot', auth, upload.single('screenshot')
   }
 });
 
+// Admin: Add player to registration (team events only)
+router.post('/:id/players', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    const { name, uucms, phone, department, gender, isSubstitute, isTeamLeader } = req.body;
+    const application = await Application.findById(req.params.id).populate('eventId');
+    
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+    if (!application.eventId.type || application.eventId.type !== 'team') {
+      return res.status(400).json({ message: 'Can only add players to team event registrations' });
+    }
+
+    // Validate new player input
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ message: 'Player name is required' });
+    }
+    const normalizedUucms = normalizeUucms(uucms);
+    if (!normalizedUucms) {
+      return res.status(400).json({ message: 'UUCMS number is required' });
+    }
+    const normalizedGender = normalizeGender(gender);
+    if (!normalizedGender || !ALLOWED_GENDERS.has(normalizedGender)) {
+      return res.status(400).json({ message: 'Gender is required and must be valid' });
+    }
+
+    // Check if UUCMS already exists in same event (including other teams)
+    const existingPlayer = await Application.findOne({
+      eventId: application.eventId._id,
+      'players.uucms': normalizedUucms,
+      'players.isSubstitute': { $ne: true }
+    });
+    if (existingPlayer) {
+      return res.status(400).json({ message: `Player with UUCMS ${normalizedUucms} is already registered for this event` });
+    }
+
+    // Create new player object
+    const newPlayer = {
+      name: String(name).trim(),
+      uucms: normalizedUucms,
+      phone: String(phone || '').trim(),
+      department: String(department || '').trim(),
+      gender: normalizedGender,
+      checkInStatus: false,
+      isSubstitute: Boolean(isSubstitute),
+      isTeamLeader: Boolean(isTeamLeader) && !isSubstitute // Team leader can't be a substitute
+    };
+
+    // Add player to registration
+    application.players.push(newPlayer);
+    await application.save();
+
+    // Reload to include mongo-generated IDs
+    const updated = await Application.findById(application._id).populate('eventId', 'title type');
+    res.status(201).json({ message: 'Player added successfully', data: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Remove player from registration
+router.delete('/:id/players/:playerId', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    const application = await Application.findById(req.params.id);
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+
+    const playerIndex = application.players.findIndex(p => String(p._id) === req.params.playerId);
+    if (playerIndex === -1) return res.status(404).json({ message: 'Player not found' });
+
+    const playerToRemove = application.players[playerIndex];
+
+    // Check if removing this player would leave no main players
+    const mainPlayersAfterRemoval = application.players.filter((p, idx) => idx !== playerIndex && !p.isSubstitute);
+    if (mainPlayersAfterRemoval.length === 0) {
+      return res.status(400).json({ message: 'Cannot remove player. At least one main player is required.' });
+    }
+
+    // Remove player
+    application.players.splice(playerIndex, 1);
+
+    // If removed player was team leader, assign leadership to first remaining main player
+    if (playerToRemove.isTeamLeader && mainPlayersAfterRemoval.length > 0) {
+      const firstMainPlayer = application.players.find(p => !p.isSubstitute);
+      if (firstMainPlayer) {
+        firstMainPlayer.isTeamLeader = true;
+      }
+    }
+
+    await application.save();
+
+    const updated = await Application.findById(application._id).populate('eventId', 'title type');
+    res.json({ message: 'Player removed successfully', data: updated });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Update player role (leader/main/substitute)
+router.patch('/:id/players/:playerId/role', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    const { isTeamLeader, isSubstitute } = req.body;
+    const application = await Application.findById(req.params.id);
+    
+    if (!application) return res.status(404).json({ message: 'Registration not found' });
+
+    const player = application.players.id(req.params.playerId);
+    if (!player) return res.status(404).json({ message: 'Player not found' });
+
+    // Update role flags
+    if (isSubstitute !== undefined) {
+      player.isSubstitute = Boolean(isSubstitute);
+      // If becoming a substitute, can't be team leader
+      if (player.isSubstitute) {
+        player.isTeamLeader = false;
+      }
+    }
+
+    if (isTeamLeader !== undefined && !player.isSubstitute) {
+      player.isTeamLeader = Boolean(isTeamLeader);
+    }
+
+    // Validate: must have exactly 1 leader among main players if there are main players
+    const mainPlayers = application.players.filter(p => !p.isSubstitute);
+    if (mainPlayers.length > 0) {
+      const leaderCount = mainPlayers.filter(p => p.isTeamLeader).length;
+      if (leaderCount === 0) {
+        // No leader among main players - assign to first main player
+        mainPlayers[0].isTeamLeader = true;
+      } else if (leaderCount > 1) {
+        // More than one leader - keep only the first
+        let foundLeader = false;
+        mainPlayers.forEach(p => {
+          if (foundLeader) {
+            p.isTeamLeader = false;
+          } else if (p.isTeamLeader) {
+            foundLeader = true;
+          }
+        });
+      }
+    }
+
+    await application.save();
+    res.json({ message: 'Player role updated', player });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
