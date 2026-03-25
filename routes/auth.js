@@ -4,6 +4,7 @@ const jwt = require('jsonwebtoken');
 const rateLimit = require('express-rate-limit');
 const { Admin, AuditLog } = require('../models');
 const { getCanonicalRole } = require('../utils/roles');
+const { validatePassword, getPasswordStrengthMessage } = require('../utils/passwordValidator');
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -14,7 +15,6 @@ const authLimiter = rateLimit({
 });
 
 const normalizeEmail = (value) => String(value || '').trim().toLowerCase();
-const isStrongPassword = (value) => String(value || '').trim().length >= 8;
 
 // Login
 router.post('/login', authLimiter, async (req, res) => {
@@ -79,8 +79,13 @@ router.post('/setup', authLimiter, async (req, res) => {
     if (setupKey !== process.env.INITIAL_SETUP_KEY) {
       return res.status(403).json({ message: 'Invalid setup key' });
     }
-    if (!isStrongPassword(password)) {
-      return res.status(400).json({ message: 'Password must be at least 8 characters long' });
+    
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({ 
+        message: getPasswordStrengthMessage(),
+        errors: passwordValidation.errors 
+      });
     }
 
     const admin = new Admin({ name: String(name).trim(), email, password, role: 'Super Admin' });

@@ -17,11 +17,19 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.get('/', async (req, res) => {
+  console.log('GET /api/settings called');
   try {
     let settings = await Settings.findOne();
-    if (!settings) settings = await Settings.create({});
+    if (!settings) {
+      console.log('No settings found, creating default...');
+      settings = await Settings.create({});
+    }
+    console.log('Settings found/created:', !!settings);
     res.json(settings);
-  } catch (err) { res.status(500).json({ message: err.message }); }
+  } catch (err) {
+    console.error('Settings GET error:', err.stack);
+    res.status(500).json({ message: err.message, error: err.toString() });
+  }
 });
 
 router.put('/', auth, requirePermission('manage_settings'), upload.single('collegeLogo'), async (req, res) => {

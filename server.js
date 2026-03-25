@@ -2,9 +2,26 @@ const express = require('express');
 const mongoose = require('mongoose');
 const cors = require('cors');
 const path = require('path');
+const http = require('http');
+const socketIo = require('socket.io');
 require('dotenv').config();
 
+const { setupSocketHandlers } = require('./utils/socket');
+
 const app = express();
+const server = http.createServer(app);
+const io = socketIo(server, {
+  cors: {
+    origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:3000'],
+    methods: ['GET', 'POST']
+  }
+});
+
+// Make io available to routes
+app.set('io', io);
+
+// Setup Socket.io handlers for real-time updates
+setupSocketHandlers(io);
 
 // Middleware
 const defaultAllowedOrigins = [
@@ -46,11 +63,30 @@ app.use('/api/tournaments', require('./routes/tournaments'));
 app.use('/api/timeline', require('./routes/timeline'));
 app.use('/api/messages', require('./routes/messages'));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
+app.get('/api/debug/models', (req, res) => {
+  const { TimelineItem } = require('./models');
+  res.json({
+    TimelineItemType: typeof TimelineItem,
+    TimelineItemName: TimelineItem?.modelName,
+    TimelineItemCollection: TimelineItem?.collection?.name,
+    TimelineItemSchemaKeys: Object.keys(TimelineItem?.schema?.paths || {})
+  });
+});
+app.get('/api/debug/timeline-test', async (req, res) => {
+  try {
+    const { TimelineItem } = require('./models');
+    const count = await TimelineItem.countDocuments();
+    const sample = await TimelineItem.findOne().lean();
+    res.json({ success: true, count, sample });
+  } catch (err) {
+    res.status(500).json({ error: err.message, stack: err.stack });
+  }
+});
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(() => console.log('MongoDB connected'))
   .catch(err => console.error('MongoDB error:', err));
 
-const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+const PORT = process.env.PORT || 5003;
+server.listen(PORT, () => console.log(`Server running on port ${PORT}`));

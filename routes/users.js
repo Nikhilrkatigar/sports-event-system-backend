@@ -3,6 +3,7 @@ const { Admin, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { ROLE_DEFINITIONS, isValidCmsRole, getCanonicalRole } = require('../utils/roles');
+const { validatePassword, getPasswordStrengthMessage } = require('../utils/passwordValidator');
 
 router.get('/roles', auth, requirePermission('manage_users'), (req, res) => {
   res.json(ROLE_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })));
@@ -25,6 +26,14 @@ router.post('/', auth, requirePermission('manage_users'), async (req, res) => {
     }
     if (!isValidCmsRole(role)) {
       return res.status(400).json({ message: 'Invalid role selected' });
+    }
+
+    const passwordValidation = validatePassword(password);
+    if (!passwordValidation.isValid) {
+      return res.status(400).json({ 
+        message: getPasswordStrengthMessage(),
+        errors: passwordValidation.errors 
+      });
     }
 
     const existing = await Admin.findOne({ email });

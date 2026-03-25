@@ -172,6 +172,11 @@ router.post('/', async (req, res) => {
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
+    // Fetch settings for registration limits
+    const settings = await require('../models').Settings.findOne() || {};
+    const maxSingleEvents = settings.maxSingleEventRegistrations || 2;
+    const maxTeamEvents = settings.maxTeamEventRegistrations || 999;
+
     const counts = await getEventRegistrationCounts(event._id);
     const registrationState = getRegistrationState(event, counts);
     if (!registrationState.canRegister) {
@@ -255,6 +260,22 @@ router.post('/', async (req, res) => {
         player.isSubstitute = false;
         player.isTeamLeader = true;
       });
+
+      // Check single-player event limit (configurable from CMS)
+      const mainPlayer = mainPlayers[0];
+      const playerApplications = await Application.find({
+        'players.uucms': mainPlayer.uucms,
+        'players.isSubstitute': { $ne: true },
+        eventId: { $ne: eventId }
+      }).populate('eventId', 'type');
+
+      const singleEventCount = playerApplications.filter(app => app.eventId?.type === 'single').length;
+      
+      if (singleEventCount >= maxSingleEvents) {
+        return res.status(400).json({ 
+          message: `Player ${mainPlayer.name} (${mainPlayer.uucms}) has already registered for ${singleEventCount} single-player event(s). Maximum allowed is ${maxSingleEvents} single-player events. Team events are ${maxTeamEvents === 999 ? 'unlimited' : maxTeamEvents + ' maximum'}.`
+        });
+      }
     }
 
     const uucmsNumbers = mainPlayers.map((player) => player.uucms);
@@ -327,6 +348,27 @@ router.post('/', async (req, res) => {
     // Populate eventId with payment details for response
     const result = await Application.findById(application._id).populate('eventId', 'title type status registrationFee paymentQRCode upiPaymentLink');
     res.status(201).json(result);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Public: Get player's registrations by UUCMS
+router.get('/player/:uucms', async (req, res) => {
+  try {
+    const { uucms } = req.params;
+    const normalizedUucms = normalizeUucms(uucms);
+    
+    if (!normalizedUucms) {
+      return res.status(400).json({ message: 'UUCMS is required' });
+    }
+
+    const applications = await Application.find({
+      'players.uucms': normalizedUucms,
+      'players.isSubstitute': { $ne: true }
+    }).populate('eventId', 'title type status date');
+
+    res.json(applications);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }

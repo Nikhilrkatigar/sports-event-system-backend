@@ -20,7 +20,25 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
-const upload = multer({ storage });
+
+// File filter for image validation
+const fileFilter = (req, file, cb) => {
+  const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
+  if (allowedMimes.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only JPEG, PNG, WebP, and GIF images are allowed'), false);
+  }
+};
+
+const upload = multer({
+  storage,
+  fileFilter,
+  limits: {
+    fileSize: 1 * 1024 * 1024 // 1MB limit
+  }
+});
+
 const uploadFields = upload.fields([
   { name: 'image', maxCount: 1 },
   { name: 'paymentQRCode', maxCount: 1 }
@@ -75,7 +93,9 @@ router.get('/', async (req, res) => {
   try {
     const events = await Event.find().sort({ date: 1, title: 1 }).lean();
     const eventCounts = await getEventCounts(events.map((event) => event._id));
-    res.json(events.map((event) => decorateEvent(event, eventCounts.get(String(event._id)))));
+    const decoratedEvents = events.map((event) => decorateEvent(event, eventCounts.get(String(event._id))));
+    
+    res.json(decoratedEvents);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -87,7 +107,9 @@ router.get('/:id', async (req, res) => {
     const event = await Event.findById(req.params.id).lean();
     if (!event) return res.status(404).json({ message: 'Event not found' });
     const eventCounts = await getEventCounts([event._id]);
-    res.json(decorateEvent(event, eventCounts.get(String(event._id))));
+    const decoratedEvent = decorateEvent(event, eventCounts.get(String(event._id)));
+    
+    res.json(decoratedEvent);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -106,6 +128,13 @@ router.post('/', auth, requirePermission('manage_events'), uploadFields, async (
     await AuditLog.create({ action: `Event Created: ${event.title}`, admin: req.admin.name, ip: req.ip });
     res.status(201).json(event);
   } catch (err) {
+    // Handle multer errors
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'File size exceeds 1MB limit' });
+    }
+    if (err.message && err.message.includes('allowed')) {
+      return res.status(400).json({ message: err.message });
+    }
     res.status(500).json({ message: err.message });
   }
 });
@@ -124,6 +153,13 @@ router.put('/:id', auth, requirePermission('manage_events'), uploadFields, async
     await AuditLog.create({ action: `Event Updated: ${event.title}`, admin: req.admin.name, ip: req.ip });
     res.json(event);
   } catch (err) {
+    // Handle multer errors
+    if (err.code === 'LIMIT_FILE_SIZE') {
+      return res.status(400).json({ message: 'File size exceeds 1MB limit' });
+    }
+    if (err.message && err.message.includes('allowed')) {
+      return res.status(400).json({ message: err.message });
+    }
     res.status(500).json({ message: err.message });
   }
 });

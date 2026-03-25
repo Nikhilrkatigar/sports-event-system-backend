@@ -3,13 +3,19 @@ const { TimelineItem, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 
+console.log('Timeline route loading... TimelineItem model:', typeof TimelineItem);
+
 // Public: Get visible timeline items only
 router.get('/', async (req, res) => {
+  console.log('GET /api/timeline called');
   try {
+    console.log('TimelineItem:', typeof TimelineItem, TimelineItem.collection ? 'has collection' : 'no collection');
     const items = await TimelineItem.find({ isPublic: true }).sort({ order: 1, time: 1 }).lean();
+    console.log('Found items:', items.length);
     res.json(items);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error('Timeline GET error:', err.stack);
+    res.status(500).json({ message: err.message, error: err.toString() });
   }
 });
 
@@ -19,7 +25,8 @@ router.get('/all', auth, requirePermission('manage_events'), async (req, res) =>
     const items = await TimelineItem.find().sort({ order: 1, time: 1 }).lean();
     res.json(items);
   } catch (err) {
-    res.status(500).json({ message: err.message });
+    console.error('Timeline GET /all error:', err);
+    res.status(500).json({ message: err.message, error: err.toString() });
   }
 });
 
