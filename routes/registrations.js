@@ -577,6 +577,88 @@ router.post('/checkin/scan', auth, requirePermission('check_in'), async (req, re
   }
 });
 
+// Admin: Get student by registration number with all their registered events
+router.get('/by-registration-number/:registrationNumber', auth, requirePermission('check_in'), async (req, res) => {
+  try {
+    const { registrationNumber } = req.params;
+    const regNum = String(registrationNumber).toUpperCase().trim();
+
+    // Find the application with this registration number
+    const application = await Application.findOne({ registrationNumber: regNum });
+    if (!application) {
+      return res.status(404).json({ message: 'Registration not found' });
+    }
+
+    // Get the main player info
+    const mainPlayer = application.players.find(p => !p.isSubstitute) || application.players[0];
+    if (!mainPlayer) {
+      return res.status(404).json({ message: 'Player not found' });
+    }
+
+    // Find ALL events this student is registered for
+    const allApplications = await Application.find({
+      'players.uucms': mainPlayer.uucms,
+      'players.isSubstitute': { $ne: true }
+    }).populate('eventId', 'title type status checkedIn');
+
+    // Map to get events with check-in status for each event
+    const events = allApplications.map(app => ({
+      _id: app.eventId._id,
+      title: app.eventId.title,
+      type: app.eventId.type,
+      status: app.eventId.status,
+      checkInStatus: app.players.find(p => p.uucms === mainPlayer.uucms)?.checkInStatus || false
+    }));
+
+    res.json({
+      student: {
+        name: mainPlayer.name,
+        uucms: mainPlayer.uucms,
+        department: mainPlayer.department,
+        gender: mainPlayer.gender
+      },
+      events
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Check-in by registration number
+router.post('/checkin/registration-number', auth, requirePermission('check_in'), async (req, res) => {
+  try {
+    const { eventId, registrationNumber } = req.body;
+    if (!eventId || !registrationNumber) {
+      return res.status(400).json({ message: 'Event and registration number are required' });
+    }
+
+    const regNum = String(registrationNumber).toUpperCase().trim();
+    const application = await Application.findOne({ eventId, registrationNumber: regNum });
+    
+    if (!application) {
+      return res.status(404).json({ message: 'Registration not found' });
+    }
+
+    // Find the main player (non-substitute)
+    let player = application.players.find(p => !p.isSubstitute) || application.players[0];
+    if (!player) {
+      return res.status(404).json({ message: 'Player not found' });
+    }
+
+    const alreadyCheckedIn = Boolean(player.checkInStatus);
+    player.checkInStatus = true;
+    await application.save();
+
+    res.json({
+      type: 'single',
+      player,
+      message: alreadyCheckedIn ? `${player.name} already checked in` : `${player.name} checked in successfully`
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Admin: Update player gender
 router.patch('/:id/players/:playerId', auth, requirePermission('manage_registrations'), async (req, res) => {
   try {
