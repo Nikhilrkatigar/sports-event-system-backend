@@ -16,6 +16,7 @@ const applicationSchema = new mongoose.Schema({
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true },
   teamId: String,
   teamName: String,
+  registrationNumber: { type: String, unique: true, sparse: true },
   qrCode: String,
   players: [playerSchema],
   paymentStatus: { type: String, enum: ['pending', 'paid', 'free'], default: 'pending' },

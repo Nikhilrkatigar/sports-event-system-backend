@@ -328,16 +328,13 @@ router.post('/', async (req, res) => {
       paymentStatus: event.registrationFee > 0 ? 'pending' : 'free'
     });
 
-    const qrPayload = JSON.stringify({
-      t: event.type === 'team' ? 'T' : 'S',
-      e: String(eventId),
-      a: String(application._id)
-    });
-    application.qrCode = await QRCode.toDataURL(qrPayload, {
-      errorCorrectionLevel: 'M',
-      margin: 2,
-      width: 420
-    });
+    // Generate registration number from UUCMS (last 5 digits)
+    // Get first main player's UUCMS
+    const mainPlayer = normalizedPlayers.find(p => !p.isSubstitute);
+    const uucmsNumber = mainPlayer?.uucms || '';
+    // Extract last 5 digits from UUCMS
+    const regNumber = String(uucmsNumber).slice(-5) || '00000';
+    application.registrationNumber = regNumber;
 
     await application.save();
     await syncEventRegistrationStatus(event, {

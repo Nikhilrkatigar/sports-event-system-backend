@@ -101,6 +101,109 @@ router.get('/', async (req, res) => {
   }
 });
 
+// Admin: Export all events as Excel
+router.get('/export/excel', auth, requirePermission('manage_events'), async (req, res) => {
+  try {
+    const events = await Event.find().sort({ date: 1, title: 1 }).lean();
+    const eventCounts = await getEventCounts(events.map((event) => event._id));
+
+    const rows = events.map((event) => {
+      const counts = eventCounts.get(String(event._id)) || {};
+      const registrationState = getRegistrationState(event, counts);
+      
+      return {
+        'Event Title': event.title,
+        'Type': event.type === 'team' ? 'Team' : 'Single Player',
+        'Lifecycle Status': event.status,
+        'Registration': event.registrationOpen ? 'Open' : 'Closed',
+        'Date': event.date ? new Date(event.date).toLocaleDateString() : 'N/A',
+        'Time': event.startTime || 'N/A',
+        'Teams Registered': registrationState.teamCount || 0,
+        'Players Registered': registrationState.playerCount || 0,
+        'Max Participants': event.maxParticipants || 'Unlimited',
+        'Team Size': event.teamSize || 'N/A',
+        'Score Order': event.scoreOrder === 'asc' ? 'Lower wins' : 'Higher wins',
+        'Registration Fee': event.registrationFee || 'Free',
+        'Venue': event.venue || 'N/A',
+        'Status': event.isFull ? 'Full' : registrationState.canRegister ? 'Available' : 'Closed'
+      };
+    });
+
+    const wb = XLSX.utils.book_new();
+    const ws = XLSX.utils.json_to_sheet(rows);
+    XLSX.utils.book_append_sheet(wb, ws, 'Events');
+    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
+
+    res.setHeader('Content-Disposition', 'attachment; filename="All_Events.xlsx"');
+    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(buffer);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Export all events as CSV
+router.get('/export/csv', auth, requirePermission('manage_events'), async (req, res) => {
+  try {
+    const events = await Event.find().sort({ date: 1, title: 1 }).lean();
+    const eventCounts = await getEventCounts(events.map((event) => event._id));
+
+    const rows = events.map((event) => {
+      const counts = eventCounts.get(String(event._id)) || {};
+      const registrationState = getRegistrationState(event, counts);
+      
+      return {
+        'Event Title': event.title,
+        'Type': event.type === 'team' ? 'Team' : 'Single Player',
+        'Lifecycle Status': event.status,
+        'Registration': event.registrationOpen ? 'Open' : 'Closed',
+        'Date': event.date ? new Date(event.date).toLocaleDateString() : 'N/A',
+        'Time': event.startTime || 'N/A',
+        'Teams Registered': registrationState.teamCount || 0,
+        'Players Registered': registrationState.playerCount || 0,
+        'Max Participants': event.maxParticipants || 'Unlimited',
+        'Team Size': event.teamSize || 'N/A',
+        'Score Order': event.scoreOrder === 'asc' ? 'Lower wins' : 'Higher wins',
+        'Registration Fee': event.registrationFee || 'Free',
+        'Venue': event.venue || 'N/A',
+        'Status': event.isFull ? 'Full' : registrationState.canRegister ? 'Available' : 'Closed'
+      };
+    });
+
+    const csv = [
+      ['Event Title', 'Type', 'Lifecycle Status', 'Registration', 'Date', 'Time', 'Teams Registered', 'Players Registered', 'Max Participants', 'Team Size', 'Score Order', 'Registration Fee', 'Venue', 'Status'],
+      ...rows.map((row) =>
+        [
+          row['Event Title'],
+          row['Type'],
+          row['Lifecycle Status'],
+          row['Registration'],
+          row['Date'],
+          row['Time'],
+          row['Teams Registered'],
+          row['Players Registered'],
+          row['Max Participants'],
+          row['Team Size'],
+          row['Score Order'],
+          row['Registration Fee'],
+          row['Venue'],
+          row['Status']
+        ].map((field) => `"${String(field).replace(/"/g, '""')}"`)
+      )
+    ]
+      .map((row) => row.join(','))
+      .join('\n');
+
+    res.setHeader('Content-Disposition', 'attachment; filename="All_Events.csv"');
+    res.setHeader('Content-Type', 'text/csv');
+    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+    res.send(csv);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Public: Get single event
 router.get('/:id', async (req, res) => {
   try {
@@ -288,90 +391,6 @@ router.post('/:id/share', async (req, res) => {
     await event.save();
     
     res.json({ shares: event.shares });
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Admin: Export all events as Excel
-router.get('/export/excel', auth, requirePermission('manage_events'), async (req, res) => {
-  try {
-    const events = await Event.find().sort({ date: 1, title: 1 }).lean();
-    const eventCounts = await getEventCounts(events.map((event) => event._id));
-
-    const rows = events.map((event) => {
-      const counts = eventCounts.get(String(event._id)) || {};
-      const registrationState = getRegistrationState(event, counts);
-      
-      return {
-        'Event Title': event.title,
-        'Type': event.type === 'team' ? 'Team' : 'Single Player',
-        'Lifecycle Status': event.status,
-        'Registration': event.registrationOpen ? 'Open' : 'Closed',
-        'Date': event.date ? new Date(event.date).toLocaleDateString() : 'N/A',
-        'Time': event.startTime || 'N/A',
-        'Teams Registered': registrationState.teamCount || 0,
-        'Players Registered': registrationState.playerCount || 0,
-        'Max Participants': event.maxParticipants || 'Unlimited',
-        'Team Size': event.teamSize || 'N/A',
-        'Score Order': event.scoreOrder === 'asc' ? 'Lower wins' : 'Higher wins',
-        'Registration Fee': event.registrationFee || 'Free',
-        'Venue': event.venue || 'N/A',
-        'Status': event.isFull ? 'Full' : registrationState.canRegister ? 'Available' : 'Closed'
-      };
-    });
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, 'Events');
-    const buffer = XLSX.write(wb, { type: 'buffer', bookType: 'xlsx' });
-
-    res.setHeader('Content-Disposition', 'attachment; filename="All_Events.xlsx"');
-    res.setHeader('Content-Type', 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-    res.send(buffer);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Admin: Export all events as CSV
-router.get('/export/csv', auth, requirePermission('manage_events'), async (req, res) => {
-  try {
-    const events = await Event.find().sort({ date: 1, title: 1 }).lean();
-    const eventCounts = await getEventCounts(events.map((event) => event._id));
-
-    const rows = events.map((event) => {
-      const counts = eventCounts.get(String(event._id)) || {};
-      const registrationState = getRegistrationState(event, counts);
-      
-      return {
-        'Event Title': event.title,
-        'Type': event.type === 'team' ? 'Team' : 'Single Player',
-        'Lifecycle Status': event.status,
-        'Registration': event.registrationOpen ? 'Open' : 'Closed',
-        'Date': event.date ? new Date(event.date).toLocaleDateString() : 'N/A',
-        'Time': event.startTime || 'N/A',
-        'Teams Registered': registrationState.teamCount || 0,
-        'Players Registered': registrationState.playerCount || 0,
-        'Max Participants': event.maxParticipants || 'Unlimited',
-        'Team Size': event.teamSize || 'N/A',
-        'Score Order': event.scoreOrder === 'asc' ? 'Lower wins' : 'Higher wins',
-        'Registration Fee': event.registrationFee || 'Free',
-        'Venue': event.venue || 'N/A',
-        'Status': event.isFull ? 'Full' : registrationState.canRegister ? 'Available' : 'Closed'
-      };
-    });
-
-    const wb = XLSX.utils.book_new();
-    const ws = XLSX.utils.json_to_sheet(rows);
-    XLSX.utils.book_append_sheet(wb, ws, 'Events');
-    const csv = XLSX.utils.sheet_to_csv(ws);
-
-    res.setHeader('Content-Disposition', 'attachment; filename="All_Events.csv"');
-    res.setHeader('Content-Type', 'text/csv');
-    res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-    res.send(csv);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
