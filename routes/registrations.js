@@ -328,12 +328,12 @@ router.post('/', async (req, res) => {
       paymentStatus: event.registrationFee > 0 ? 'pending' : 'free'
     });
 
-    // Generate registration number from UUCMS (last 5 digits)
+    // Generate registration number from UUCMS (use full UUCMS for uniqueness)
     // Get first main player's UUCMS
     const mainPlayer = normalizedPlayers.find(p => !p.isSubstitute);
     const uucmsNumber = mainPlayer?.uucms || '';
-    // Extract last 5 digits from UUCMS
-    const regNumber = String(uucmsNumber).slice(-5) || '00000';
+    // Use full UUCMS as registration number (ensures uniqueness per student)
+    const regNumber = String(uucmsNumber).toUpperCase() || 'UNKNOWN';
     application.registrationNumber = regNumber;
 
     await application.save();
@@ -581,10 +581,18 @@ router.post('/checkin/scan', auth, requirePermission('check_in'), async (req, re
 router.get('/by-registration-number/:registrationNumber', auth, requirePermission('check_in'), async (req, res) => {
   try {
     const { registrationNumber } = req.params;
-    const regNum = String(registrationNumber).toUpperCase().trim();
+    const input = String(registrationNumber).toUpperCase().trim();
 
-    // Find the application with this registration number
-    const application = await Application.findOne({ registrationNumber: regNum });
+    // Try exact match first (full UUCMS)
+    let application = await Application.findOne({ registrationNumber: input });
+    
+    // If not found, try searching for UUCMS ending with the input (e.g., "S0087" matches "U02CG23S0087")
+    if (!application) {
+      application = await Application.findOne({ 
+        registrationNumber: new RegExp(input + '$', 'i')
+      });
+    }
+
     if (!application) {
       return res.status(404).json({ message: 'Registration not found' });
     }
@@ -632,11 +640,21 @@ router.post('/checkin/registration-number', auth, requirePermission('check_in'),
       return res.status(400).json({ message: 'Event and registration number are required' });
     }
 
-    const regNum = String(registrationNumber).toUpperCase().trim();
-    const application = await Application.findOne({ eventId, registrationNumber: regNum });
+    const input = String(registrationNumber).toUpperCase().trim();
+    
+    // Try exact match first (full UUCMS)
+    let application = await Application.findOne({ eventId, registrationNumber: input });
+    
+    // If not found, try searching for UUCMS ending with the input (e.g., "S0087" matches "U02CG23S0087")
+    if (!application) {
+      application = await Application.findOne({ 
+        eventId,
+        registrationNumber: new RegExp(input + '$', 'i')
+      });
+    }
     
     if (!application) {
-      return res.status(404).json({ message: 'Registration not found' });
+      return res.status(404).json({ message: 'Registration not found for this event' });
     }
 
     // Find the main player (non-substitute)
