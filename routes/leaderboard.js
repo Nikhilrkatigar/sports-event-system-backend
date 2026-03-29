@@ -1,5 +1,5 @@
 const router = require('express').Router();
-const { Leaderboard, Event, Application } = require('../models');
+const { Leaderboard, Event, Application, Tournament, TournamentMatch, GeneralChampionship } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 
@@ -99,6 +99,182 @@ const recalcRanks = async (eventId) => {
 
   if (ops.length > 0) await Leaderboard.bulkWrite(ops);
 };
+
+// Sync tournament results to leaderboard - Auto-add winners as leaderboard entries
+const syncTournamentToLeaderboard = async (eventId) => {
+  try {
+    const tournament = await Tournament.findOne({ eventId });
+    if (!tournament || tournament.status !== 'in_progress') return { synced: 0, message: 'No completed tournament found' };
+
+    const event = await Event.findById(eventId);
+    if (!event) return { synced: 0, message: 'Event not found' };
+
+    const matches = await TournamentMatch.find({ tournamentId: tournament._id });
+    if (!matches || matches.length === 0) return { synced: 0, message: 'No tournament matches found' };
+
+    let syncedCount = 0;
+
+    // Handle field flight format - winners already ranked
+    if (tournament.format === 'field_flight') {
+      for (const match of matches) {
+        if (!Array.isArray(match.fieldEntries) || match.fieldEntries.length === 0) continue;
+
+        // Get top 3 by rank
+        const ranked = match.fieldEntries.filter(e => e.rank != null && e.rank <= 3);
+        
+        for (const entry of ranked) {
+          if (!entry.label) continue;
+          
+          const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: entry.label });
+          if (!existing) {
+            const gender = await fetchGenderFromRegistration(eventId, entry.label);
+            const newEntry = new Leaderboard({
+              eventId,
+              teamOrPlayer: entry.label,
+              score: entry.bestScore || 0,
+              gender,
+              hype: 0
+            });
+            await newEntry.save();
+            syncedCount++;
+          }
+        }
+      }
+    }
+
+    // Handle track heats format - participant with best time/lowest time
+    if (tournament.format === 'track_heats') {
+      const qualified = matches
+        .flatMap(m => (m.lanes || []).filter(lane => lane.isQualified))
+        .sort((a, b) => {
+          if (a.finishPosition == null) return 1;
+          if (b.finishPosition == null) return -1;
+          return a.finishPosition - b.finishPosition;
+        });
+
+      for (let i = 0; i < Math.min(3, qualified.length); i++) {
+        const lane = qualified[i];
+        if (!lane.label) continue;
+
+        const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: lane.label });
+        if (!existing) {
+          const gender = await fetchGenderFromRegistration(eventId, lane.label);
+          const newEntry = new Leaderboard({
+            eventId,
+            teamOrPlayer: lane.label,
+            score: lane.finishPosition || 0,
+            gender,
+            hype: 0
+          });
+          await newEntry.save();
+          syncedCount++;
+        }
+      }
+    }
+
+    // Handle single elimination and round robin - tournament winner
+    if (['single_elimination', 'round_robin'].includes(tournament.format)) {
+      const winners = matches
+        .filter(m => m.status === 'completed' && m.winner)
+        .map(m => ({
+          label: m.winner,
+          score: (m.score1 || 0) + (m.score2 || 0)
+        }))
+        .reduce((acc, curr) => {
+          const existing = acc.find(x => x.label === curr.label);
+          if (existing) {
+            existing.score += curr.score;
+          } else {
+            acc.push(curr);
+          }
+          return acc;
+        }, [])
+        .sort((a, b) => b.score - a.score)
+        .slice(0, 3); // top 3
+
+      for (const winner of winners) {
+        if (!winner.label) continue;
+
+        const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: winner.label });
+        if (!existing) {
+          const gender = await fetchGenderFromRegistration(eventId, winner.label);
+          const newEntry = new Leaderboard({
+            eventId,
+            teamOrPlayer: winner.label,
+            score: winner.score,
+            gender,
+            hype: 0
+          });
+          await newEntry.save();
+          syncedCount++;
+        }
+      }
+    }
+
+    if (syncedCount > 0) {
+      await recalcRanks(eventId);
+    }
+
+    return { synced: syncedCount, message: `Auto-synced ${syncedCount} tournament winner(s) to leaderboard` };
+  } catch (err) {
+    console.error('Error syncing tournament to leaderboard:', err);
+    return { synced: 0, message: `Sync error: ${err.message}` };
+  }
+};
+
+// Admin endpoint: Sync tournament results to leaderboard
+router.post('/sync-tournament/:eventId', auth, requirePermission('manage_leaderboard'), async (req, res) => {
+  try {
+    const result = await syncTournamentToLeaderboard(req.params.eventId);
+    
+    // Auto-recalculate General Championship after sync
+    try {
+      const gc = await GeneralChampionship.findOne() || new GeneralChampionship({ championship_id: 'gc-main' });
+      const departmentScores = new Map();
+      
+      // Get top 3 from each event in leaderboard
+      const allLeaderboard = await Leaderboard.find().populate('eventId', 'title type');
+      const eventGroups = new Map();
+      
+      for (const entry of allLeaderboard) {
+        if (!entry.eventId) continue;
+        const eventKey = entry.eventId._id.toString();
+        if (!eventGroups.has(eventKey)) {
+          eventGroups.set(eventKey, { eventId: entry.eventId._id, eventTitle: entry.eventId.title, isTeamEvent: entry.eventId.type === 'team', entries: [] });
+        }
+        eventGroups.get(eventKey).entries.push(entry);
+      }
+      
+      gc.entries = [];
+      const pointsMap = { 1: { individual: 15, team: 25 }, 2: { individual: 10, team: 15 }, 3: { individual: 5, team: 10 } };
+      
+      for (const [, eventData] of eventGroups.entries()) {
+        const sorted = eventData.entries.filter(e => e.rank && e.rank <= 3).sort((a, b) => a.rank - b.rank);
+        
+        for (let i = 0; i < Math.min(3, sorted.length); i++) {
+          const entry = sorted[i];
+          const position = i + 1;
+          const app = await Application.findOne({ eventId: eventData.eventId, $or: [{ teamName: entry.teamOrPlayer }, { 'players.name': entry.teamOrPlayer }] });
+          const department = app?.players?.[0]?.department || 'Unassigned';
+          const points = eventData.isTeamEvent ? pointsMap[position].team : pointsMap[position].individual;
+          
+          gc.entries.push({ eventId: eventData.eventId, eventTitle: eventData.eventTitle, isTeamEvent: eventData.isTeamEvent, departmentName: department, position, participantName: entry.teamOrPlayer, points });
+          departmentScores.set(department, (departmentScores.get(department) || 0) + points);
+        }
+      }
+      
+      gc.departmentScores = departmentScores;
+      gc.updatedAt = new Date();
+      await gc.save();
+    } catch (gcErr) {
+      console.error('Error updating GC:', gcErr);
+    }
+    
+    res.json({ ...result, message: result.message + ' (General Championship updated)' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
 
 router.get('/', async (req, res) => {
   try {

@@ -10,6 +10,7 @@ const Tournament = require('./Tournament');
 const TournamentMatch = require('./TournamentMatch');
 const TimelineItem = require('./TimelineItem');
 const Message = require('./Message');
+const GeneralChampionship = require('./GeneralChampionship');
 
 module.exports = {
   Admin,
@@ -22,6 +23,7 @@ module.exports = {
   Tournament,
   TournamentMatch,
   TimelineItem,
-  Message
+  Message,
+  GeneralChampionship
 };
 

@@ -3,6 +3,7 @@ const mongoose = require('mongoose');
 const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   type: { type: String, enum: ['single', 'team'], required: true },
+  eventCategory: { type: String, enum: ['general', 'track', 'field'], default: 'general' },
   status: {
     type: String,
     enum: ['draft', 'coming_soon', 'published', 'open', 'full', 'live', 'completed', 'archived'],
@@ -29,8 +30,10 @@ const eventSchema = new mongoose.Schema({
   registrationFee: { type: Number, default: 0 },
   upiPaymentLink: { type: String, default: '' },
   paymentQRCode: { type: String, default: '' },
-  // Track event configuration (for single events with track_heats format)
+  // Track event configuration (used for track races and relay heats)
   lanesPerHeat: { type: Number, default: 8, min: 1, max: 20 },
+  // Field event configuration (shot put, long jump, etc.)
+  fieldAttempts: { type: Number, default: 3, min: 1, max: 10 },
   // Social features
   likes: { type: [String], default: [] },
   interested: { type: [String], default: [] },

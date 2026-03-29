@@ -1,5 +1,6 @@
 const EVENT_STATUSES = ['draft', 'published', 'open', 'full', 'live', 'completed', 'archived'];
 const PUBLIC_EVENT_STATUSES = ['published', 'open', 'full', 'live', 'completed'];
+const EVENT_CATEGORIES = ['general', 'track', 'field'];
 
 const normalizeDate = (value) => {
   if (!value) return null;
@@ -56,12 +57,17 @@ const getNormalizedEventPayload = (input = {}) => {
   const payload = { ...input };
   const status = String(payload.status || '').trim().toLowerCase();
   if (EVENT_STATUSES.includes(status)) payload.status = status;
+  const eventCategory = String(payload.eventCategory || '').trim().toLowerCase();
+  if (EVENT_CATEGORIES.includes(eventCategory)) payload.eventCategory = eventCategory;
 
   if (payload.maxParticipants === '' || payload.maxParticipants == null) delete payload.maxParticipants;
   else payload.maxParticipants = Number(payload.maxParticipants);
 
   if (payload.teamSize === '' || payload.teamSize == null) delete payload.teamSize;
   else payload.teamSize = Math.max(1, Number(payload.teamSize));
+
+  if (payload.fieldAttempts === '' || payload.fieldAttempts == null) delete payload.fieldAttempts;
+  else payload.fieldAttempts = Math.min(10, Math.max(1, Number(payload.fieldAttempts)));
 
   if (payload.registrationDeadline === '') delete payload.registrationDeadline;
   if (payload.date === '') delete payload.date;
@@ -107,6 +113,7 @@ const syncEventRegistrationStatus = async (event, counts = {}) => {
 
 module.exports = {
   EVENT_STATUSES,
+  EVENT_CATEGORIES,
   PUBLIC_EVENT_STATUSES,
   getMainPlayerCount,
   getEventCapacity,

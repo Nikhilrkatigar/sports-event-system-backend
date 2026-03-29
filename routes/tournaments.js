@@ -30,7 +30,7 @@ const generateLaneOrder = (laneCount) => {
   }
   return result;
 };
-const TOURNAMENT_FORMATS = ['single_elimination', 'round_robin', 'track_heats'];
+const TOURNAMENT_FORMATS = ['single_elimination', 'round_robin', 'track_heats', 'field_flight'];
 
 const nextPowerOf2 = (n) => {
   let p = 1;
@@ -50,6 +50,32 @@ const getMainPlayer = (application) => (
   application.players.find((player) => !player.isSubstitute) || application.players[0]
 );
 
+const getPrimaryPlayer = (application) => (
+  application.players.find((player) => player.isTeamLeader && !player.isSubstitute)
+  || getMainPlayer(application)
+);
+
+const getEventCategory = (event) => {
+  if (event?.eventCategory) return event.eventCategory;
+  return event?.type === 'single' ? 'track' : 'general';
+};
+
+const getAllowedFormatsForEvent = (event) => {
+  const category = getEventCategory(event);
+  if (category === 'track') return ['track_heats'];
+  if (category === 'field') return ['field_flight'];
+  return ['single_elimination', 'round_robin'];
+};
+
+const getApplicationDepartment = (application) => {
+  const player = getPrimaryPlayer(application);
+  return String(player?.department || 'Unassigned').trim() || 'Unassigned';
+};
+
+const getParticipantUucms = (application) => (
+  String(getPrimaryPlayer(application)?.uucms || '').trim().toUpperCase()
+);
+
 const toParticipantLabel = (event, application) => {
   if (event.type === 'team') {
     return application.teamName || application.teamId || `Team ${application._id.toString().slice(-4)}`;
@@ -61,21 +87,36 @@ const toParticipantLabel = (event, application) => {
 const buildParticipantPayload = (event, application) => ({
   applicationId: application._id,
   label: toParticipantLabel(event, application),
+  uucms: getParticipantUucms(application),
   isBye: false
 });
 
-const buildHeatParticipantPayload = (application) => {
-  const mainPlayer = getMainPlayer(application);
+const buildTrackParticipantPayload = (event, application) => {
   return {
     applicationId: application._id,
-    label: mainPlayer?.name || `Player ${application._id.toString().slice(-4)}`,
-    department: String(mainPlayer?.department || 'Unassigned').trim() || 'Unassigned'
+    label: toParticipantLabel(event, application),
+    uucms: getParticipantUucms(application),
+    department: getApplicationDepartment(application)
   };
 };
+
+const buildFieldEntryPayload = (event, application, index) => ({
+  applicationId: application._id,
+  label: toParticipantLabel(event, application),
+  uucms: getParticipantUucms(application),
+  registrationNumber: application.registrationNumber || '',
+  department: getApplicationDepartment(application),
+  order: index + 1,
+  attempts: Array.from({ length: Math.max(1, Number(event?.fieldAttempts) || 3) }, () => null),
+  bestScore: null,
+  performance: null,
+  rank: null
+});
 
 const buildByeParticipant = () => ({
   applicationId: null,
   label: 'BYE',
+  uucms: '',
   isBye: true
 });
 
@@ -144,6 +185,7 @@ const assignTrackLanes = (participants, laneCount = 8) => {
     .map((participant, index) => ({
       applicationId: participant.applicationId,
       label: participant.label,
+      uucms: participant.uucms || '',
       department: participant.department,
       lane: laneOrder[index % laneOrder.length],
       finishPosition: null,
@@ -153,10 +195,88 @@ const assignTrackLanes = (participants, laneCount = 8) => {
     .sort((a, b) => a.lane - b.lane);
 };
 
+// Enrich field entries with UUCMS and registration numbers from Application records
+const enrichFieldEntriesWithUucms = async (matches) => {
+  try {
+    const applicationIds = new Set();
+    matches.forEach((match) => {
+      if (Array.isArray(match.fieldEntries)) {
+        match.fieldEntries.forEach((entry) => {
+          if (entry.applicationId) {
+            applicationIds.add(entry.applicationId.toString());
+          }
+        });
+      }
+      if (Array.isArray(match.lanes)) {
+        match.lanes.forEach((lane) => {
+          if (lane.applicationId) {
+            applicationIds.add(lane.applicationId.toString());
+          }
+        });
+      }
+    });
+
+    if (applicationIds.size === 0) return matches;
+
+    const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } }).select('players registrationNumber');
+    const appDataMap = new Map();
+    
+    applications.forEach((app) => {
+      const primaryPlayer = getPrimaryPlayer(app);
+      appDataMap.set(app._id.toString(), {
+        uucms: primaryPlayer?.uucms ? String(primaryPlayer.uucms).trim().toUpperCase() : '',
+        registrationNumber: app.registrationNumber || ''
+      });
+    });
+
+    // Enrich matches with UUCMS and registration number data
+    matches.forEach((match) => {
+      if (Array.isArray(match.fieldEntries)) {
+        match.fieldEntries = match.fieldEntries.map((entry) => {
+          if (entry.applicationId) {
+            const appId = entry.applicationId.toString();
+            const appData = appDataMap.get(appId);
+            if (appData) {
+              return {
+                ...entry,
+                uucms: entry.uucms || appData.uucms,
+                registrationNumber: entry.registrationNumber || appData.registrationNumber
+              };
+            }
+          }
+          return entry;
+        });
+      }
+      
+      // Also enrich lanes for track heats
+      if (Array.isArray(match.lanes)) {
+        match.lanes = match.lanes.map((lane) => {
+          if (lane.applicationId) {
+            const appId = lane.applicationId.toString();
+            const appData = appDataMap.get(appId);
+            if (appData) {
+              return {
+                ...lane,
+                uucms: lane.uucms || appData.uucms
+              };
+            }
+          }
+          return lane;
+        });
+      }
+    });
+
+    return matches;
+  } catch (err) {
+    console.error('Error enriching field entries with UUCMS:', err.message);
+    return matches; // Return as-is if enrichment fails
+  }
+};
+
 // Public: Get all tournaments
 router.get('/', async (req, res) => {
   try {
-    const tournaments = await Tournament.find().populate('eventId', 'title type image date status');
+    const tournaments = await Tournament.find().populate('eventId', 'title type image date status lanesPerHeat eventCategory');
     res.json(tournaments.map(hydrateTournament));
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -166,9 +286,13 @@ router.get('/', async (req, res) => {
 // Public: Get tournament + matches for an event
 router.get('/event/:eventId', async (req, res) => {
   try {
-    const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status');
+    const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
     if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
-    const matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+    let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+    
+    // Enrich field entries with UUCMS data if missing
+    matches = await enrichFieldEntriesWithUucms(matches);
+    
     res.json({ tournament: hydrateTournament(tournament), matches });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -178,7 +302,7 @@ router.get('/event/:eventId', async (req, res) => {
 // Public: Get all LIVE (in-progress) matches across all tournaments
 router.get('/live', async (req, res) => {
   try {
-    const liveMatches = await TournamentMatch.find({ status: 'in_progress' })
+    let liveMatches = await TournamentMatch.find({ status: 'in_progress' })
       .populate({
         path: 'tournamentId',
         select: 'format status',
@@ -188,7 +312,11 @@ router.get('/live', async (req, res) => {
       .limit(10);
 
     const validLive = liveMatches.filter((match) => match.tournamentId && match.tournamentId.eventId);
-    res.json(validLive);
+    
+    // Enrich field entries with UUCMS data if missing
+    const enrichedLive = await enrichFieldEntriesWithUucms(validLive);
+    
+    res.json(enrichedLive);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -202,14 +330,11 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
       return res.status(400).json({ message: 'Event ID and format are required' });
     }
     if (!TOURNAMENT_FORMATS.includes(format)) {
-      return res.status(400).json({ message: 'Format must be single_elimination, round_robin, or track_heats' });
+      return res.status(400).json({ message: 'Format must be single_elimination, round_robin, track_heats, or field_flight' });
     }
 
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
-    if (format === 'track_heats' && event.type !== 'single') {
-      return res.status(400).json({ message: 'Track heats are only available for individual events' });
-    }
 
     const existing = await Tournament.findOne({ eventId });
     if (existing) {
@@ -245,8 +370,10 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
       matches = generateSingleElimination(tournament, participants, eventId);
     } else if (format === 'round_robin') {
       matches = generateRoundRobin(tournament, participants, eventId);
-    } else {
+    } else if (format === 'track_heats') {
       matches = generateTrackHeats(tournament, applications, eventId, event);
+    } else {
+      matches = generateFieldFlight(tournament, applications, eventId, event);
     }
 
     await TournamentMatch.insertMany(matches);
@@ -297,6 +424,7 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
 
     const tournament = await Tournament.findById(match.tournamentId);
     if (!tournament) return res.status(404).json({ message: 'Tournament not found' });
+    const event = await Event.findById(match.eventId).select('scoreOrder');
 
     if (tournament.format === 'track_heats') {
       if (!Array.isArray(req.body.lanes) || req.body.lanes.length === 0) {
@@ -333,6 +461,92 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
       const winnerLane = sortedLanes[0] || null;
       match.winnerId = winnerLane?.applicationId || null;
       match.winner = winnerLane?.label || null;
+      match.winnerUucms = winnerLane?.uucms || '';
+      match.status = 'completed';
+      match.updatedAt = new Date();
+      await match.save();
+    } else if (tournament.format === 'field_flight') {
+      if (!Array.isArray(req.body.fieldEntries) || req.body.fieldEntries.length === 0) {
+        return res.status(400).json({ message: 'Field results are required for field flights' });
+      }
+      if (!Array.isArray(match.fieldEntries) || match.fieldEntries.length === 0) {
+        return res.status(400).json({ message: 'This flight has no participant assignments' });
+      }
+
+      const updatesByKey = new Map(
+        req.body.fieldEntries.map((entry) => {
+          const key = entry.applicationId ? String(entry.applicationId) : `order:${Number(entry.order)}`;
+          return [key, entry];
+        })
+      );
+
+      const updatedEntries = match.fieldEntries.map((entry) => {
+        const entryObject = entry.toObject ? entry.toObject() : entry;
+        const key = entryObject.applicationId ? String(entryObject.applicationId) : `order:${Number(entryObject.order)}`;
+        const update = updatesByKey.get(key);
+        if (!update) return entryObject;
+
+        const attemptCount = Array.isArray(entryObject.attempts) && entryObject.attempts.length > 0
+          ? entryObject.attempts.length
+          : Math.max(1, Number(event?.fieldAttempts) || 3);
+
+        const attempts = Array.isArray(update.attempts) && update.attempts.length > 0
+          ? update.attempts.slice(0, attemptCount).map((attempt) => {
+              if (attempt === '' || attempt == null) return null;
+              const numericAttempt = Number(attempt);
+              return Number.isFinite(numericAttempt) ? numericAttempt : null;
+            })
+          : [update.performance];
+
+        while (attempts.length < attemptCount) attempts.push(null);
+        const validAttempts = attempts.filter((attempt) => attempt != null);
+        const bestScore = validAttempts.length === 0
+          ? null
+          : (event?.scoreOrder || 'desc') === 'asc'
+            ? Math.min(...validAttempts)
+            : Math.max(...validAttempts);
+
+        return {
+          ...entryObject,
+          attempts,
+          bestScore,
+          performance: bestScore,
+          rank: null
+        };
+      });
+
+      const completedEntries = updatedEntries
+        .filter((entry) => entry.bestScore != null)
+        .sort((a, b) => {
+          if ((event?.scoreOrder || 'desc') === 'asc') {
+            return a.bestScore - b.bestScore || a.order - b.order;
+          }
+          return b.bestScore - a.bestScore || a.order - b.order;
+        });
+
+      if (completedEntries.length === 0) {
+        return res.status(400).json({ message: 'Enter at least one valid mark before saving results' });
+      }
+
+      const rankMap = new Map(
+        completedEntries.map((entry, index) => {
+          const key = entry.applicationId ? String(entry.applicationId) : `order:${Number(entry.order)}`;
+          return [key, index + 1];
+        })
+      );
+
+      match.fieldEntries = updatedEntries.map((entry) => {
+        const key = entry.applicationId ? String(entry.applicationId) : `order:${Number(entry.order)}`;
+        return {
+          ...entry,
+          rank: rankMap.get(key) || null
+        };
+      });
+
+      const winnerEntry = completedEntries[0] || null;
+      match.winnerId = winnerEntry?.applicationId || null;
+      match.winner = winnerEntry?.label || null;
+      match.winnerUucms = winnerEntry?.uucms || '';
       match.status = 'completed';
       match.updatedAt = new Date();
       await match.save();
@@ -356,12 +570,15 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
       if (match.score1 > match.score2) {
         match.winnerId = match.participant1Id;
         match.winner = match.participant1;
+        match.winnerUucms = match.participant1Uucms || '';
       } else if (match.score2 > match.score1) {
         match.winnerId = match.participant2Id;
         match.winner = match.participant2;
+        match.winnerUucms = match.participant2Uucms || '';
       } else {
         match.winnerId = null;
         match.winner = null;
+        match.winnerUucms = '';
       }
 
       match.status = 'completed';
@@ -579,6 +796,8 @@ function generateSingleElimination(tournament, participants, eventId) {
       participant2Id: participant2.applicationId,
       participant1: participant1.label,
       participant2: participant2.label,
+      participant1Uucms: participant1.uucms || '',
+      participant2Uucms: participant2.uucms || '',
       status: 'pending'
     });
   }
@@ -619,6 +838,8 @@ function generateRoundRobin(tournament, participants, eventId) {
         participant2Id: participants[j].applicationId,
         participant1: participants[i].label,
         participant2: participants[j].label,
+        participant1Uucms: participants[i].uucms || '',
+        participant2Uucms: participants[j].uucms || '',
         status: 'pending'
       });
     }
@@ -630,7 +851,7 @@ function generateRoundRobin(tournament, participants, eventId) {
 function generateTrackHeats(tournament, applications, eventId, event) {
   const lanesPerHeat = event?.lanesPerHeat || 8;
   const heatCount = Math.ceil(applications.length / lanesPerHeat);
-  const heatParticipants = applications.map(buildHeatParticipantPayload);
+  const heatParticipants = applications.map((application) => buildTrackParticipantPayload(event, application));
   const balancedHeats = spreadParticipantsAcrossHeats(heatParticipants, heatCount, lanesPerHeat);
 
   return balancedHeats.map((heat, index) => ({
@@ -646,6 +867,22 @@ function generateTrackHeats(tournament, applications, eventId, event) {
     lanes: assignTrackLanes(heat, lanesPerHeat),
     status: 'pending'
   }));
+}
+
+function generateFieldFlight(tournament, applications, eventId, event) {
+  return [{
+    eventId,
+    tournamentId: tournament._id,
+    round: 1,
+    matchNumber: 1,
+    participant1Id: null,
+    participant2Id: null,
+    participant1: null,
+    participant2: null,
+    heatName: `${event?.title || 'Field Event'} Flight`,
+    fieldEntries: applications.map((application, index) => buildFieldEntryPayload(event, application, index)),
+    status: 'pending'
+  }];
 }
 
 async function resolveByes(tournamentId) {
@@ -665,8 +902,10 @@ async function resolveByes(tournamentId) {
 
     const winnerId = match.participant1 === 'BYE' ? match.participant2Id : match.participant1Id;
     const winner = match.participant1 === 'BYE' ? match.participant2 : match.participant1;
+    const winnerUucms = match.participant1 === 'BYE' ? match.participant2Uucms : match.participant1Uucms;
     match.winnerId = winnerId;
     match.winner = winner;
+    match.winnerUucms = winnerUucms || '';
     match.score1 = match.participant1 === 'BYE' ? 0 : 1;
     match.score2 = match.participant2 === 'BYE' ? 0 : 1;
     match.status = 'completed';
@@ -697,9 +936,11 @@ async function advanceWinner(match) {
   if (match.matchNumber % 2 === 1) {
     nextMatch.participant1Id = match.winnerId;
     nextMatch.participant1 = match.winner;
+    nextMatch.participant1Uucms = match.winnerUucms || '';
   } else {
     nextMatch.participant2Id = match.winnerId;
     nextMatch.participant2 = match.winner;
+    nextMatch.participant2Uucms = match.winnerUucms || '';
   }
   nextMatch.updatedAt = new Date();
 

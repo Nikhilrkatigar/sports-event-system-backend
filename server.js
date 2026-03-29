@@ -55,6 +55,7 @@ app.use('/api/auth', require('./routes/auth'));
 app.use('/api/events', require('./routes/events'));
 app.use('/api/registrations', require('./routes/registrations'));
 app.use('/api/leaderboard', require('./routes/leaderboard'));
+app.use('/api/generalchampionship', require('./routes/generalchampionship'));
 app.use('/api/gallery', require('./routes/gallery'));
 app.use('/api/settings', require('./routes/settings'));
 app.use('/api/audit', require('./routes/audit'));
