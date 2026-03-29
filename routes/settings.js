@@ -17,14 +17,11 @@ const storage = multer.diskStorage({
 const upload = multer({ storage });
 
 router.get('/', async (req, res) => {
-  console.log('GET /api/settings called');
   try {
     let settings = await Settings.findOne();
     if (!settings) {
-      console.log('No settings found, creating default...');
       settings = await Settings.create({});
     }
-    console.log('Settings found/created:', !!settings);
     res.json(settings);
   } catch (err) {
     console.error('Settings GET error:', err.stack);
