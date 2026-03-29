@@ -6,6 +6,14 @@ const http = require('http');
 const socketIo = require('socket.io');
 require('dotenv').config();
 
+// Suppress util._extend deprecation warning from dependencies
+process.removeAllListeners('warning');
+process.on('warning', (warning) => {
+  if (warning.code !== 'DEP0060') {
+    console.warn(warning.stack);
+  }
+});
+
 const { setupSocketHandlers } = require('./utils/socket');
 
 const app = express();
