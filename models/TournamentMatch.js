@@ -35,6 +35,8 @@ const tournamentMatchSchema = new mongoose.Schema({
   participant2: { type: String, default: null },
   participant1Uucms: { type: String, default: '' },
   participant2Uucms: { type: String, default: '' },
+  participant1RegistrationNumber: { type: String, default: '' },
+  participant2RegistrationNumber: { type: String, default: '' },
   score1: { type: Number, default: null },
   score2: { type: Number, default: null },
   winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },

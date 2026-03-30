@@ -88,6 +88,7 @@ const buildParticipantPayload = (event, application) => ({
   applicationId: application._id,
   label: toParticipantLabel(event, application),
   uucms: getParticipantUucms(application),
+  registrationNumber: application.registrationNumber || '',
   isBye: false
 });
 
@@ -289,6 +290,65 @@ router.get('/event/:eventId', async (req, res) => {
     const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
     if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
     let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+    
+    // Enrich field entries with UUCMS data if missing
+    matches = await enrichFieldEntriesWithUucms(matches);
+    
+    res.json({ tournament: hydrateTournament(tournament), matches });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Public: Get tournament + matches with player details for printing
+router.get('/event/:eventId/print', async (req, res) => {
+  try {
+    const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
+    if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
+    
+    let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+    
+    // For single elimination, enrich with player details
+    if (tournament.format === 'single_elimination' || tournament.format === 'round_robin') {
+      const applicationIds = new Set();
+      matches.forEach((match) => {
+        if (match.participant1Id) applicationIds.add(match.participant1Id.toString());
+        if (match.participant2Id) applicationIds.add(match.participant2Id.toString());
+      });
+
+      if (applicationIds.size > 0) {
+        const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } })
+          .select('_id teamName teamId players registrationNumber');
+        
+        const appMap = new Map();
+        applications.forEach((app) => {
+          appMap.set(app._id.toString(), app);
+        });
+
+        matches = matches.map((match) => {
+          const matchObj = match.toObject ? match.toObject() : match;
+          if (matchObj.participant1Id) {
+            const app = appMap.get(matchObj.participant1Id.toString());
+            if (app) {
+              matchObj.participant1TeamDetails = {
+                teamName: app.teamName || app.teamId,
+                players: app.players || []
+              };
+            }
+          }
+          if (matchObj.participant2Id) {
+            const app = appMap.get(matchObj.participant2Id.toString());
+            if (app) {
+              matchObj.participant2TeamDetails = {
+                teamName: app.teamName || app.teamId,
+                players: app.players || []
+              };
+            }
+          }
+          return matchObj;
+        });
+      }
+    }
     
     // Enrich field entries with UUCMS data if missing
     matches = await enrichFieldEntriesWithUucms(matches);
@@ -798,6 +858,8 @@ function generateSingleElimination(tournament, participants, eventId) {
       participant2: participant2.label,
       participant1Uucms: participant1.uucms || '',
       participant2Uucms: participant2.uucms || '',
+      participant1RegistrationNumber: participant1.registrationNumber || '',
+      participant2RegistrationNumber: participant2.registrationNumber || '',
       status: 'pending'
     });
   }
@@ -840,6 +902,8 @@ function generateRoundRobin(tournament, participants, eventId) {
         participant2: participants[j].label,
         participant1Uucms: participants[i].uucms || '',
         participant2Uucms: participants[j].uucms || '',
+        participant1RegistrationNumber: participants[i].registrationNumber || '',
+        participant2RegistrationNumber: participants[j].registrationNumber || '',
         status: 'pending'
       });
     }
