@@ -818,6 +818,7 @@ router.get('/export/excel', auth, requirePermission('view_registrations'), async
       for (const player of app.players) {
         rows.push({
           Event: app.eventId?.title || '',
+          'Reg. Number': app.registrationNumber || 'N/A',
           'Team ID': app.teamId || 'N/A',
           'Team Name': app.teamName || 'N/A',
           'Player Name': player.name,
@@ -859,6 +860,7 @@ router.get('/export/event/:eventId', auth, requirePermission('view_registrations
     for (const app of applications) {
       for (const player of app.players) {
         const row = { Event: event.title };
+        row['Reg. Number'] = app.registrationNumber || 'N/A';
         if (event.type === 'team') {
           row['Team ID'] = app.teamId || 'N/A';
           row['Team Name'] = app.teamName || 'N/A';
@@ -898,12 +900,12 @@ router.get('/export/csv', auth, requirePermission('view_registrations'), async (
     if (eventId) query.eventId = eventId;
 
     const applications = await Application.find(query).populate('eventId', 'title');
-    let csv = 'Event,Team ID,Team Name,Player Name,UUCMS Number,Phone,Department,Gender,Role,Check-In,Registration Date\n';
+    let csv = 'Event,Reg. Number,Team ID,Team Name,Player Name,UUCMS Number,Phone,Department,Gender,Role,Check-In,Registration Date\n';
 
     for (const app of applications) {
       for (const player of app.players) {
         const role = player.isTeamLeader ? 'Leader' : player.isSubstitute ? 'Substitute' : 'Player';
-        csv += `"${app.eventId?.title || ''}","${app.teamId || 'N/A'}","${app.teamName || 'N/A'}","${player.name}","${player.uucms}","${player.phone}","${player.department}","${formatGender(player.gender)}","${role}","${player.checkInStatus ? 'Yes' : 'No'}","${new Date(app.createdAt).toLocaleDateString()}"\n`;
+        csv += `"${app.eventId?.title || ''}","${app.registrationNumber || 'N/A'}","${app.teamId || 'N/A'}","${app.teamName || 'N/A'}","${player.name}","${player.uucms}","${player.phone}","${player.department}","${formatGender(player.gender)}","${role}","${player.checkInStatus ? 'Yes' : 'No'}","${new Date(app.createdAt).toLocaleDateString()}"\n`;
       }
     }
 
