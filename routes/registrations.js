@@ -50,6 +50,7 @@ const buildSearchQuery = (search) => {
   const regex = new RegExp(escapeRegex(trimmed), 'i');
   return {
     $or: [
+      { registrationNumber: regex },
       { teamId: regex },
       { teamName: regex },
       { 'players.name': regex },
