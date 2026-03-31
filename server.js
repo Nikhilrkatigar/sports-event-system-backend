@@ -94,7 +94,17 @@ app.get('/api/debug/timeline-test', async (req, res) => {
 
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
-  .then(() => console.log('MongoDB connected'))
+  .then(async () => {
+    console.log('MongoDB connected');
+    // Sync Tournament indexes (drops old unique eventId index, creates new compound index)
+    try {
+      const { Tournament } = require('./models');
+      await Tournament.syncIndexes();
+      console.log('Tournament indexes synced');
+    } catch (err) {
+      console.warn('Could not sync Tournament indexes:', err.message);
+    }
+  })
   .catch(err => console.error('MongoDB error:', err));
 
 const PORT = process.env.PORT || 5003;

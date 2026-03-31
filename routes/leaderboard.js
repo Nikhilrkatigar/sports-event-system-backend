@@ -1,7 +1,8 @@
 const router = require('express').Router();
-const { Leaderboard, Event, Application, Tournament, TournamentMatch, GeneralChampionship } = require('../models');
+const { Leaderboard, Event, Application, Tournament, TournamentMatch } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const { calculateGeneralChampionship } = require('../utils/generalChampionship');
 
 const resolveScoreOrder = async (eventId) => {
   if (!eventId) return 'desc';
@@ -101,10 +102,16 @@ const recalcRanks = async (eventId) => {
 };
 
 // Sync tournament results to leaderboard - Auto-add winners as leaderboard entries
-const syncTournamentToLeaderboard = async (eventId) => {
+const syncTournamentToLeaderboard = async (eventId, options = {}) => {
   try {
-    const tournament = await Tournament.findOne({ eventId });
-    if (!tournament || tournament.status !== 'in_progress') return { synced: 0, message: 'No completed tournament found' };
+    const query = { eventId };
+    if (options.tournamentId) query._id = options.tournamentId;
+    else if (options.genderFilter && ['male', 'female', 'all'].includes(options.genderFilter)) query.genderFilter = options.genderFilter;
+
+    const tournament = await Tournament.findOne(query).sort({ createdAt: -1 });
+    if (!tournament || !['in_progress', 'completed'].includes(tournament.status)) {
+      return { synced: 0, message: 'No completed tournament found' };
+    }
 
     const event = await Event.findById(eventId);
     if (!event) return { synced: 0, message: 'Event not found' };
@@ -144,12 +151,40 @@ const syncTournamentToLeaderboard = async (eventId) => {
 
     // Handle track heats format - participant with best time/lowest time
     if (tournament.format === 'track_heats') {
-      const qualified = matches
-        .flatMap(m => (m.lanes || []).filter(lane => lane.isQualified))
+      const completedMatches = matches.filter((match) => match.status === 'completed');
+      const latestRound = completedMatches.length > 0
+        ? Math.max(...completedMatches.map((match) => Number(match.round) || 1))
+        : 1;
+
+      let podiumCandidates = [];
+      if (latestRound > 1) {
+        podiumCandidates = completedMatches
+          .filter((match) => (Number(match.round) || 1) === latestRound)
+          .flatMap((match) => match.lanes || [])
+          .filter((lane) => lane.finishPosition != null || String(lane.finishTime || '').trim());
+      } else {
+        podiumCandidates = completedMatches
+          .flatMap((match) => (match.lanes || []).filter((lane) => lane.isQualified));
+
+        if (podiumCandidates.length === 0) {
+          podiumCandidates = completedMatches
+            .flatMap((match) => match.lanes || [])
+            .filter((lane) => lane.finishPosition != null || String(lane.finishTime || '').trim());
+        }
+      }
+
+      const qualified = podiumCandidates
         .sort((a, b) => {
+          const hasTimeA = Boolean(String(a.finishTime || '').trim());
+          const hasTimeB = Boolean(String(b.finishTime || '').trim());
+          if (hasTimeA && hasTimeB) {
+            return (parseFloat(a.finishTime) || Infinity) - (parseFloat(b.finishTime) || Infinity)
+              || (a.finishPosition ?? 999) - (b.finishPosition ?? 999)
+              || a.lane - b.lane;
+          }
           if (a.finishPosition == null) return 1;
           if (b.finishPosition == null) return -1;
-          return a.finishPosition - b.finishPosition;
+          return a.finishPosition - b.finishPosition || a.lane - b.lane;
         });
 
       for (let i = 0; i < Math.min(3, qualified.length); i++) {
@@ -225,47 +260,14 @@ const syncTournamentToLeaderboard = async (eventId) => {
 // Admin endpoint: Sync tournament results to leaderboard
 router.post('/sync-tournament/:eventId', auth, requirePermission('manage_leaderboard'), async (req, res) => {
   try {
-    const result = await syncTournamentToLeaderboard(req.params.eventId);
+    const result = await syncTournamentToLeaderboard(req.params.eventId, {
+      tournamentId: req.body?.tournamentId,
+      genderFilter: req.body?.genderFilter
+    });
     
     // Auto-recalculate General Championship after sync
     try {
-      const gc = await GeneralChampionship.findOne() || new GeneralChampionship({ championship_id: 'gc-main' });
-      const departmentScores = new Map();
-      
-      // Get top 3 from each event in leaderboard
-      const allLeaderboard = await Leaderboard.find().populate('eventId', 'title type');
-      const eventGroups = new Map();
-      
-      for (const entry of allLeaderboard) {
-        if (!entry.eventId) continue;
-        const eventKey = entry.eventId._id.toString();
-        if (!eventGroups.has(eventKey)) {
-          eventGroups.set(eventKey, { eventId: entry.eventId._id, eventTitle: entry.eventId.title, isTeamEvent: entry.eventId.type === 'team', entries: [] });
-        }
-        eventGroups.get(eventKey).entries.push(entry);
-      }
-      
-      gc.entries = [];
-      const pointsMap = { 1: { individual: 15, team: 25 }, 2: { individual: 10, team: 15 }, 3: { individual: 5, team: 10 } };
-      
-      for (const [, eventData] of eventGroups.entries()) {
-        const sorted = eventData.entries.filter(e => e.rank && e.rank <= 3).sort((a, b) => a.rank - b.rank);
-        
-        for (let i = 0; i < Math.min(3, sorted.length); i++) {
-          const entry = sorted[i];
-          const position = i + 1;
-          const app = await Application.findOne({ eventId: eventData.eventId, $or: [{ teamName: entry.teamOrPlayer }, { 'players.name': entry.teamOrPlayer }] });
-          const department = app?.players?.[0]?.department || 'Unassigned';
-          const points = eventData.isTeamEvent ? pointsMap[position].team : pointsMap[position].individual;
-          
-          gc.entries.push({ eventId: eventData.eventId, eventTitle: eventData.eventTitle, isTeamEvent: eventData.isTeamEvent, departmentName: department, position, participantName: entry.teamOrPlayer, points });
-          departmentScores.set(department, (departmentScores.get(department) || 0) + points);
-        }
-      }
-      
-      gc.departmentScores = departmentScores;
-      gc.updatedAt = new Date();
-      await gc.save();
+      await calculateGeneralChampionship();
     } catch (gcErr) {
       console.error('Error updating GC:', gcErr);
     }

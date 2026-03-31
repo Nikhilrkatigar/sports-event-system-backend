@@ -1,5 +1,5 @@
-const EVENT_STATUSES = ['draft', 'published', 'open', 'full', 'live', 'completed', 'archived'];
-const PUBLIC_EVENT_STATUSES = ['published', 'open', 'full', 'live', 'completed'];
+const EVENT_STATUSES = ['draft', 'coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed', 'archived'];
+const PUBLIC_EVENT_STATUSES = ['coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed'];
 const EVENT_CATEGORIES = ['general', 'track', 'field'];
 
 const normalizeDate = (value) => {
@@ -55,10 +55,16 @@ const getRegistrationState = (event, counts = {}, nowInput = new Date()) => {
 
 const getNormalizedEventPayload = (input = {}) => {
   const payload = { ...input };
-  const status = String(payload.status || '').trim().toLowerCase();
-  if (EVENT_STATUSES.includes(status)) payload.status = status;
-  const eventCategory = String(payload.eventCategory || '').trim().toLowerCase();
-  if (EVENT_CATEGORIES.includes(eventCategory)) payload.eventCategory = eventCategory;
+  if (payload.status != null) {
+    const status = String(payload.status || '').trim().toLowerCase();
+    if (EVENT_STATUSES.includes(status)) payload.status = status;
+    else delete payload.status;
+  }
+  if (payload.eventCategory != null) {
+    const eventCategory = String(payload.eventCategory || '').trim().toLowerCase();
+    if (EVENT_CATEGORIES.includes(eventCategory)) payload.eventCategory = eventCategory;
+    else delete payload.eventCategory;
+  }
 
   if (payload.maxParticipants === '' || payload.maxParticipants == null) delete payload.maxParticipants;
   else payload.maxParticipants = Number(payload.maxParticipants);

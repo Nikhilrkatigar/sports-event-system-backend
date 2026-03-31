@@ -6,7 +6,7 @@ const eventSchema = new mongoose.Schema({
   eventCategory: { type: String, enum: ['general', 'track', 'field'], default: 'general' },
   status: {
     type: String,
-    enum: ['draft', 'coming_soon', 'published', 'open', 'full', 'live', 'completed', 'archived'],
+    enum: ['draft', 'coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed', 'archived'],
     default: 'draft'
   },
   scoreOrder: { type: String, enum: ['asc', 'desc'], default: 'desc' },

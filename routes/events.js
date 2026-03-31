@@ -275,15 +275,15 @@ router.patch('/:id/toggle-registration', auth, requirePermission('manage_events'
     const eventCounts = await getEventCounts([event._id]);
     const state = getRegistrationState(event, eventCounts.get(String(event._id)));
 
-    if (event.status === 'open' || event.status === 'full') {
+    if (event.registrationOpen !== false) {
       event.registrationOpen = false;
-      event.status = 'published';
+      event.status = 'closed';
     } else {
       if (state.isFull) {
         return res.status(400).json({ message: 'This event is already full. Increase capacity before reopening registration.' });
       }
       event.registrationOpen = true;
-      event.status = 'open';
+      event.status = state.isFull ? 'full' : 'open';
     }
     await event.save();
     const status = event.registrationOpen ? 'opened' : 'closed';

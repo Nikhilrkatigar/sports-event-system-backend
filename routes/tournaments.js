@@ -284,17 +284,44 @@ router.get('/', async (req, res) => {
   }
 });
 
-// Public: Get tournament + matches for an event
+// Public: Get tournament + matches for an event (supports multiple gender-specific tournaments)
 router.get('/event/:eventId', async (req, res) => {
   try {
-    const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
-    if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
-    let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
-    
-    // Enrich field entries with UUCMS data if missing
-    matches = await enrichFieldEntriesWithUucms(matches);
-    
-    res.json({ tournament: hydrateTournament(tournament), matches });
+    const { genderFilter } = req.query;
+    const query = { eventId: req.params.eventId };
+    if (genderFilter && ['male', 'female', 'all'].includes(genderFilter)) {
+      query.genderFilter = genderFilter;
+    }
+    const tournaments = await Tournament.find(query).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
+    if (tournaments.length === 0) return res.status(404).json({ message: 'No tournament found for this event' });
+
+    // If a specific genderFilter was requested, return a single tournament
+    if (genderFilter) {
+      const tournament = tournaments[0];
+      let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+      matches = await enrichFieldEntriesWithUucms(matches);
+      return res.json({ tournament: hydrateTournament(tournament), matches });
+    }
+
+    // Otherwise return all tournaments for this event
+    const allTournaments = [];
+    for (const tournament of tournaments) {
+      let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+      matches = await enrichFieldEntriesWithUucms(matches);
+      allTournaments.push({ tournament: hydrateTournament(tournament), matches });
+    }
+
+    // For backward compatibility: if only one tournament, return flat format
+    if (allTournaments.length === 1) {
+      return res.json(allTournaments[0]);
+    }
+
+    // Multiple tournaments: return first one as the primary response with extras
+    res.json({
+      tournament: allTournaments[0].tournament,
+      matches: allTournaments[0].matches,
+      allTournaments
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -303,7 +330,15 @@ router.get('/event/:eventId', async (req, res) => {
 // Public: Get tournament + matches with player details for printing
 router.get('/event/:eventId/print', async (req, res) => {
   try {
-    const tournament = await Tournament.findOne({ eventId: req.params.eventId }).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
+    const { genderFilter } = req.query;
+    const query = { eventId: req.params.eventId };
+    if (genderFilter && ['male', 'female', 'all'].includes(genderFilter)) {
+      query.genderFilter = genderFilter;
+    }
+
+    const tournament = await Tournament.findOne(query)
+      .sort({ createdAt: 1 })
+      .populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
     if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
     
     let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
@@ -396,9 +431,12 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
-    const existing = await Tournament.findOne({ eventId });
+    const normalizedGender = genderFilter && ['male', 'female'].includes(genderFilter) ? genderFilter : 'all';
+
+    const existing = await Tournament.findOne({ eventId, genderFilter: normalizedGender });
     if (existing) {
-      return res.status(400).json({ message: 'A tournament already exists for this event. Delete it first to regenerate.' });
+      const filterLabel = normalizedGender === 'all' ? '' : ` (${normalizedGender})`;
+      return res.status(400).json({ message: `A tournament${filterLabel} already exists for this event. Delete it first to regenerate.` });
     }
 
     let applications = await Application.find({ eventId }).sort({ createdAt: 1 });
@@ -410,10 +448,10 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
       });
     }
 
-    if (genderFilter && ['male', 'female'].includes(genderFilter)) {
+    if (normalizedGender !== 'all') {
       applications = applications.filter((application) => {
         const mainPlayers = application.players.filter((player) => !player.isSubstitute);
-        return mainPlayers.every((player) => player.gender === genderFilter);
+        return mainPlayers.every((player) => player.gender === normalizedGender);
       });
     }
 
@@ -422,7 +460,7 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
     }
 
     const participants = applications.map((application) => buildParticipantPayload(event, application));
-    const tournament = new Tournament({ eventId, format, participants, status: 'draft' });
+    const tournament = new Tournament({ eventId, format, genderFilter: normalizedGender, participants, status: 'draft' });
     await tournament.save();
 
     let matches = [];
@@ -484,7 +522,8 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
 
     const tournament = await Tournament.findById(match.tournamentId);
     if (!tournament) return res.status(404).json({ message: 'Tournament not found' });
-    const event = await Event.findById(match.eventId).select('scoreOrder');
+    const event = await Event.findById(match.eventId).select('scoreOrder lanesPerHeat');
+    let responseMessage = null;
 
     if (tournament.format === 'track_heats') {
       if (!Array.isArray(req.body.lanes) || req.body.lanes.length === 0) {
@@ -525,6 +564,13 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
       match.status = 'completed';
       match.updatedAt = new Date();
       await match.save();
+
+      const qualificationRound = await createTrackQualificationRound(tournament, event, Number(match.round) || 1);
+      if (qualificationRound.created) {
+        responseMessage = qualificationRound.matches.length === 1
+          ? 'Heat results saved and finals generated'
+          : `Heat results saved and Round ${qualificationRound.newRound} generated`;
+      }
     } else if (tournament.format === 'field_flight') {
       if (!Array.isArray(req.body.fieldEntries) || req.body.fieldEntries.length === 0) {
         return res.status(400).json({ message: 'Field results are required for field flights' });
@@ -666,7 +712,7 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
       emitTournamentMatchUpdate(io, match.tournamentId.toString(), match.toObject());
     }
     
-    res.json({ match, allMatches });
+    res.json({ match, allMatches, message: responseMessage });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -707,121 +753,28 @@ router.post('/:tournamentId/generate-qualifications', auth, requirePermission('m
       return res.status(400).json({ message: 'No heats found to qualify from' });
     }
 
-    // Check which heats are completed
-    const completedHeats = heatMatches.filter(h => h.status === 'completed');
-    if (completedHeats.length === 0) {
-      return res.status(400).json({ message: 'No heats completed yet. Complete at least one heat to generate qualifications.' });
+    if (!heatMatches.every((heat) => heat.status === 'completed')) {
+      return res.status(400).json({ message: 'Complete all heats before generating the next round.' });
     }
-
-    // Collect all lanes with results
-    const allLanes = [];
-    heatMatches.forEach(heat => {
-      if (heat.lanes && heat.lanes.length > 0) {
-        heat.lanes.forEach(lane => {
-          allLanes.push({
-            ...lane.toObject(),
-            heatName: heat.heatName,
-            heatId: heat._id
-          });
-        });
-      }
-    });
-
-    // Determine qualification method
-    const hasTimings = allLanes.some(lane => lane.finishTime && String(lane.finishTime).trim());
-    
-    let qualifiedLanes = [];
-    if (hasTimings) {
-      // Rank by time across ALL heats (lowest/fastest time = best)
-      const lanesWithTime = allLanes
-        .filter(lane => lane.finishTime && String(lane.finishTime).trim())
-        .sort((a, b) => {
-          const timeA = parseFloat(a.finishTime) || Infinity;
-          const timeB = parseFloat(b.finishTime) || Infinity;
-          return timeA - timeB;
-        });
-      
-      qualifiedLanes = lanesWithTime.slice(0, 3); // Top 3 fastest
-    } else {
-      // Take top 3 from each completed heat
-      const qualsByHeat = {};
-      completedHeats.forEach(heat => {
-        const heatLanes = heat.lanes
-          .filter(lane => lane.finishPosition !== null)
-          .sort((a, b) => a.finishPosition - b.finishPosition)
-          .slice(0, 3);
-        
-        if (heatLanes.length > 0) {
-          qualsByHeat[heat._id] = heatLanes;
-          qualifiedLanes.push(...heatLanes);
-        }
-      });
-    }
-
-    if (qualifiedLanes.length === 0) {
-      return res.status(400).json({ message: 'No qualified players found. Enter results first.' });
-    }
-
-    // Create new semifinals/finals heats
     const event = await Event.findById(tournament.eventId);
-    const lanesPerHeat = event?.lanesPerHeat || 8;
-    const heatCount = Math.ceil(qualifiedLanes.length / lanesPerHeat);
-    
-    const newRound = Math.max(...heatMatches.map(h => h.round)) + 1;
-    
-    // Create new heats with qualified participants
-    const qualificationMatches = [];
-    for (let i = 0; i < heatCount; i++) {
-      const startIdx = i * lanesPerHeat;
-      const endIdx = Math.min(startIdx + lanesPerHeat, qualifiedLanes.length);
-      const heatParticipants = qualifiedLanes.slice(startIdx, endIdx);
-      
-      const newMatch = new TournamentMatch({
-        eventId: tournament.eventId,
-        tournamentId: tournament._id,
-        round: newRound,
-        matchNumber: i + 1,
-        heatName: heatCount === 1 ? 'Finals' : `Semifinal ${i + 1}`,
-        lanes: assignTrackLanes(
-          heatParticipants.map(lane => ({
-            applicationId: lane.applicationId,
-            label: lane.label,
-            department: lane.department
-          })),
-          lanesPerHeat
-        ),
-        status: 'pending'
-      });
-      
-      qualificationMatches.push(newMatch);
+    const qualificationRound = await createTrackQualificationRound(tournament, event, 1);
+    if (!qualificationRound.created) {
+      return res.status(400).json({ message: 'Mark qualified athletes and save heat results first.' });
     }
-
-    // Mark qualified in original heats
-    heatMatches.forEach(heat => {
-      heat.lanes.forEach(lane => {
-        lane.isQualified = qualifiedLanes.some(q => 
-          q.applicationId?.toString() === lane.applicationId?.toString()
-        );
-      });
-      heat.save();
-    });
-
-    // Save qualification heats
-    await TournamentMatch.insertMany(qualificationMatches);
 
     const allMatches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
 
     await AuditLog.create({
-      action: `Qualification Heats Generated: ${tournament.eventId} (Round ${newRound})`,
+      action: `Qualification Heats Generated: ${tournament.eventId} (Round ${qualificationRound.newRound})`,
       admin: req.admin.name,
       ip: req.ip
     });
 
     res.status(201).json({
-      message: hasTimings 
-        ? `Top 3 by time qualified to Round ${newRound}` 
-        : `Top 3 from each heat qualified to Round ${newRound}`,
-      matches: qualificationMatches,
+      message: qualificationRound.matches.length === 1
+        ? 'Qualified athletes advanced to Finals'
+        : `Qualified athletes advanced to Round ${qualificationRound.newRound}`,
+      matches: qualificationRound.matches,
       allMatches
     });
   } catch (err) {
@@ -947,6 +900,71 @@ function generateFieldFlight(tournament, applications, eventId, event) {
     fieldEntries: applications.map((application, index) => buildFieldEntryPayload(event, application, index)),
     status: 'pending'
   }];
+}
+
+async function createTrackQualificationRound(tournament, event, sourceRound = 1) {
+  const existingNextRound = await TournamentMatch.exists({
+    tournamentId: tournament._id,
+    round: { $gt: sourceRound }
+  });
+  if (existingNextRound) return { created: false, matches: [] };
+
+  const roundMatches = await TournamentMatch.find({
+    tournamentId: tournament._id,
+    round: sourceRound
+  }).sort({ matchNumber: 1 });
+  if (roundMatches.length === 0 || !roundMatches.every((roundMatch) => roundMatch.status === 'completed')) {
+    return { created: false, matches: [] };
+  }
+
+  const qualifiedLanes = roundMatches.flatMap((roundMatch) =>
+    (roundMatch.lanes || [])
+      .filter((lane) => lane.isQualified)
+      .map((lane) => ({
+        ...(lane.toObject ? lane.toObject() : lane),
+        heatName: roundMatch.heatName,
+        heatId: roundMatch._id
+      }))
+  );
+
+  if (qualifiedLanes.length < 2) return { created: false, matches: [] };
+
+  const lanesPerHeat = event?.lanesPerHeat || 8;
+  const heatCount = Math.ceil(qualifiedLanes.length / lanesPerHeat);
+  const newRound = sourceRound + 1;
+  const qualificationMatches = [];
+
+  for (let i = 0; i < heatCount; i++) {
+    const startIdx = i * lanesPerHeat;
+    const endIdx = Math.min(startIdx + lanesPerHeat, qualifiedLanes.length);
+    const heatParticipants = qualifiedLanes.slice(startIdx, endIdx);
+    const heatName = heatCount === 1
+      ? 'Finals'
+      : newRound === 2
+        ? `Semifinal ${i + 1}`
+        : `Round ${newRound} Heat ${i + 1}`;
+
+    qualificationMatches.push({
+      eventId: tournament.eventId,
+      tournamentId: tournament._id,
+      round: newRound,
+      matchNumber: i + 1,
+      heatName,
+      lanes: assignTrackLanes(
+        heatParticipants.map((lane) => ({
+          applicationId: lane.applicationId,
+          label: lane.label,
+          uucms: lane.uucms || '',
+          department: lane.department
+        })),
+        lanesPerHeat
+      ),
+      status: 'pending'
+    });
+  }
+
+  const insertedMatches = await TournamentMatch.insertMany(qualificationMatches);
+  return { created: true, matches: insertedMatches, newRound };
 }
 
 async function resolveByes(tournamentId) {
