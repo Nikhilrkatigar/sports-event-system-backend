@@ -97,6 +97,7 @@ const buildTrackParticipantPayload = (event, application) => {
     applicationId: application._id,
     label: toParticipantLabel(event, application),
     uucms: getParticipantUucms(application),
+    registrationNumber: application.registrationNumber || '',
     department: getApplicationDepartment(application)
   };
 };
@@ -187,6 +188,7 @@ const assignTrackLanes = (participants, laneCount = 8) => {
       applicationId: participant.applicationId,
       label: participant.label,
       uucms: participant.uucms || '',
+      registrationNumber: participant.registrationNumber || '',
       department: participant.department,
       lane: laneOrder[index % laneOrder.length],
       finishPosition: null,
@@ -258,7 +260,8 @@ const enrichFieldEntriesWithUucms = async (matches) => {
             if (appData) {
               return {
                 ...lane,
-                uucms: lane.uucms || appData.uucms
+                uucms: lane.uucms || appData.uucms,
+                registrationNumber: lane.registrationNumber || appData.registrationNumber
               };
             }
           }
