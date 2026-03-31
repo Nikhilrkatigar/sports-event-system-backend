@@ -202,7 +202,10 @@ const assignTrackLanes = (participants, laneCount = 8) => {
 const enrichFieldEntriesWithUucms = async (matches) => {
   try {
     const applicationIds = new Set();
+    const eventIds = new Set();
+    
     matches.forEach((match) => {
+      if (match.eventId) eventIds.add(match.eventId.toString());
       if (Array.isArray(match.fieldEntries)) {
         match.fieldEntries.forEach((entry) => {
           if (entry.applicationId) {
@@ -219,33 +222,62 @@ const enrichFieldEntriesWithUucms = async (matches) => {
       }
     });
 
-    if (applicationIds.size === 0) return matches;
-
-    const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } }).select('players registrationNumber');
-    const appDataMap = new Map();
+    // Build maps for enrichment
+    const appDataMapById = new Map();
+    const appDataMapByUucms = new Map();
     
-    applications.forEach((app) => {
-      const primaryPlayer = getPrimaryPlayer(app);
-      appDataMap.set(app._id.toString(), {
-        uucms: primaryPlayer?.uucms ? String(primaryPlayer.uucms).trim().toUpperCase() : '',
-        registrationNumber: app.registrationNumber || ''
+    if (applicationIds.size > 0) {
+      const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } }).select('_id players registrationNumber');
+      applications.forEach((app) => {
+        const primaryPlayer = getPrimaryPlayer(app);
+        const appData = {
+          uucms: primaryPlayer?.uucms ? String(primaryPlayer.uucms).trim().toUpperCase() : '',
+          registrationNumber: app.registrationNumber || ''
+        };
+        appDataMapById.set(app._id.toString(), appData);
+        if (appData.uucms) {
+          appDataMapByUucms.set(appData.uucms, appData);
+        }
       });
-    });
+    }
+
+    // For track heats, also fetch all applications by event to enable uucms-based lookup
+    if (eventIds.size > 0) {
+      const allApplications = await Application.find({ eventId: { $in: Array.from(eventIds) } }).select('_id players registrationNumber');
+      allApplications.forEach((app) => {
+        const primaryPlayer = getPrimaryPlayer(app);
+        const uucms = primaryPlayer?.uucms ? String(primaryPlayer.uucms).trim().toUpperCase() : '';
+        if (uucms && !appDataMapByUucms.has(uucms)) {
+          appDataMapByUucms.set(uucms, {
+            uucms,
+            registrationNumber: app.registrationNumber || ''
+          });
+        }
+      });
+    }
 
     // Enrich matches with UUCMS and registration number data
     matches.forEach((match) => {
       if (Array.isArray(match.fieldEntries)) {
         match.fieldEntries = match.fieldEntries.map((entry) => {
+          let appData = null;
+          
+          // First try by applicationId
           if (entry.applicationId) {
-            const appId = entry.applicationId.toString();
-            const appData = appDataMap.get(appId);
-            if (appData) {
-              return {
-                ...entry,
-                uucms: entry.uucms || appData.uucms,
-                registrationNumber: entry.registrationNumber || appData.registrationNumber
-              };
-            }
+            appData = appDataMapById.get(entry.applicationId.toString());
+          }
+          
+          // Fallback: try by uucms
+          if (!appData && entry.uucms) {
+            appData = appDataMapByUucms.get(entry.uucms.trim().toUpperCase());
+          }
+          
+          if (appData) {
+            return {
+              ...entry,
+              uucms: entry.uucms || appData.uucms,
+              registrationNumber: entry.registrationNumber || appData.registrationNumber
+            };
           }
           return entry;
         });
@@ -254,16 +286,24 @@ const enrichFieldEntriesWithUucms = async (matches) => {
       // Also enrich lanes for track heats
       if (Array.isArray(match.lanes)) {
         match.lanes = match.lanes.map((lane) => {
+          let appData = null;
+          
+          // First try by applicationId
           if (lane.applicationId) {
-            const appId = lane.applicationId.toString();
-            const appData = appDataMap.get(appId);
-            if (appData) {
-              return {
-                ...lane,
-                uucms: lane.uucms || appData.uucms,
-                registrationNumber: lane.registrationNumber || appData.registrationNumber
-              };
-            }
+            appData = appDataMapById.get(lane.applicationId.toString());
+          }
+          
+          // Fallback: try by uucms
+          if (!appData && lane.uucms) {
+            appData = appDataMapByUucms.get(lane.uucms.trim().toUpperCase());
+          }
+          
+          if (appData) {
+            return {
+              ...lane,
+              uucms: lane.uucms || appData.uucms,
+              registrationNumber: lane.registrationNumber || appData.registrationNumber
+            };
           }
           return lane;
         });

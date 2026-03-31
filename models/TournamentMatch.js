@@ -4,6 +4,7 @@ const tournamentLaneSchema = new mongoose.Schema({
   applicationId: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
   label: { type: String, required: true },
   uucms: { type: String, default: '' },
+  registrationNumber: { type: String, default: '' },
   department: { type: String, default: '' },
   lane: { type: Number, required: true },
   finishPosition: { type: Number, default: null },
