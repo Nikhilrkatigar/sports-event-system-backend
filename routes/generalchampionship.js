@@ -26,7 +26,7 @@ router.get('/', async (req, res) => {
 
     // Format response with sorted departments
     const sortedDepts = Object.entries(deptScores)
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([dept, score]) => ({ department: dept, totalPoints: score }));
 
     res.json({
@@ -50,7 +50,7 @@ router.post('/calculate', auth, requirePermission('manage_leaderboard'), async (
     const deptScores = gcObj.departmentScores || {};
     
     const sortedDepts = Object.entries(deptScores)
-      .sort((a, b) => b[1] - a[1])
+      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .map(([dept, score]) => ({ department: dept, totalPoints: score }));
 
     res.json({
@@ -84,6 +84,7 @@ router.get('/department/:department', async (req, res) => {
       totalPoints: totalScore,
       eventResults: deptEntries.map(e => ({
         event: e.eventTitle,
+        competition: e.competitionLabel || e.eventTitle,
         position: e.position,
         participant: e.participantName,
         points: e.points,

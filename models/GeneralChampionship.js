@@ -1,6 +1,9 @@
 const mongoose = require('mongoose');
 
 const generalChampionshipEntrySchema = new mongoose.Schema({
+  competitionKey: { type: String, required: true },
+  competitionLabel: { type: String, required: true },
+  sourceGender: { type: String, enum: ['male', 'female', 'unspecified'], default: 'unspecified' },
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true },
   eventTitle: { type: String, required: true },
   isTeamEvent: { type: Boolean, default: false },

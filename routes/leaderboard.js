@@ -6,7 +6,13 @@ const { calculateGeneralChampionship } = require('../utils/generalChampionship')
 
 const resolveScoreOrder = async (eventId) => {
   if (!eventId) return 'desc';
-  const event = await Event.findById(eventId).select('scoreOrder');
+  const [event, tournament] = await Promise.all([
+    Event.findById(eventId).select('scoreOrder eventCategory'),
+    Tournament.findOne({ eventId }).sort({ createdAt: -1 }).select('format')
+  ]);
+
+  if (tournament?.format === 'track_heats') return 'asc';
+  if (event?.eventCategory === 'track') return 'asc';
   return event?.scoreOrder === 'asc' ? 'asc' : 'desc';
 };
 
@@ -101,6 +107,97 @@ const recalcRanks = async (eventId) => {
   if (ops.length > 0) await Leaderboard.bulkWrite(ops);
 };
 
+const buildScoredScopeQuery = (eventId, tournament) => {
+  const query = {
+    eventId,
+    $or: [
+      { rank: { $ne: null } },
+      { score: { $nin: [null, 0] } }
+    ]
+  };
+
+  if (['male', 'female'].includes(tournament?.genderFilter)) {
+    query.gender = tournament.genderFilter;
+  }
+
+  return query;
+};
+
+const syncPodiumToLeaderboard = async (eventId, tournament, podiumEntries = []) => {
+  if (!Array.isArray(podiumEntries) || podiumEntries.length === 0) {
+    return 0;
+  }
+
+  const scopeQuery = buildScoredScopeQuery(eventId, tournament);
+  const existingEntries = await Leaderboard.find(scopeQuery).sort({ _id: 1 });
+  const existingByLabel = new Map();
+
+  existingEntries.forEach((entry) => {
+    const key = String(entry.teamOrPlayer || '').trim();
+    if (!key) return;
+    if (!existingByLabel.has(key)) existingByLabel.set(key, []);
+    existingByLabel.get(key).push(entry);
+  });
+
+  const touchedIds = new Set();
+  let syncedCount = 0;
+
+  for (const podiumEntry of podiumEntries) {
+    const label = String(podiumEntry.label || '').trim();
+    if (!label) continue;
+
+    const matchingEntries = existingByLabel.get(label) || [];
+    const reusableEntry = matchingEntries.find((entry) => !touchedIds.has(String(entry._id)));
+    const gender = ['male', 'female'].includes(tournament?.genderFilter)
+      ? tournament.genderFilter
+      : await fetchGenderFromRegistration(eventId, label);
+
+    if (reusableEntry) {
+      reusableEntry.score = podiumEntry.score;
+      reusableEntry.gender = gender;
+      reusableEntry.rank = null;
+      reusableEntry.updatedAt = new Date();
+      await reusableEntry.save();
+      touchedIds.add(String(reusableEntry._id));
+
+      for (const duplicateEntry of matchingEntries) {
+        const duplicateId = String(duplicateEntry._id);
+        if (duplicateId !== String(reusableEntry._id) && !touchedIds.has(duplicateId)) {
+          await Leaderboard.findByIdAndDelete(duplicateEntry._id);
+          touchedIds.add(duplicateId);
+        }
+      }
+    } else {
+      const created = await Leaderboard.create({
+        eventId,
+        teamOrPlayer: label,
+        score: podiumEntry.score,
+        gender,
+        hype: 0
+      });
+      touchedIds.add(String(created._id));
+    }
+
+    syncedCount += 1;
+  }
+
+  const podiumLabels = new Set(
+    podiumEntries
+      .map((entry) => String(entry.label || '').trim())
+      .filter(Boolean)
+  );
+
+  const staleEntryIds = existingEntries
+    .filter((entry) => !podiumLabels.has(String(entry.teamOrPlayer || '').trim()))
+    .map((entry) => entry._id);
+
+  if (staleEntryIds.length > 0) {
+    await Leaderboard.deleteMany({ _id: { $in: staleEntryIds } });
+  }
+
+  return syncedCount;
+};
+
 // Sync tournament results to leaderboard - Auto-add winners as leaderboard entries
 const syncTournamentToLeaderboard = async (eventId, options = {}) => {
   try {
@@ -120,6 +217,7 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
     if (!matches || matches.length === 0) return { synced: 0, message: 'No tournament matches found' };
 
     let syncedCount = 0;
+    let podiumEntries = [];
 
     // Handle field flight format - winners already ranked
     if (tournament.format === 'field_flight') {
@@ -127,25 +225,15 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
         if (!Array.isArray(match.fieldEntries) || match.fieldEntries.length === 0) continue;
 
         // Get top 3 by rank
-        const ranked = match.fieldEntries.filter(e => e.rank != null && e.rank <= 3);
-        
-        for (const entry of ranked) {
-          if (!entry.label) continue;
-          
-          const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: entry.label });
-          if (!existing) {
-            const gender = await fetchGenderFromRegistration(eventId, entry.label);
-            const newEntry = new Leaderboard({
-              eventId,
-              teamOrPlayer: entry.label,
-              score: entry.bestScore || 0,
-              gender,
-              hype: 0
-            });
-            await newEntry.save();
-            syncedCount++;
-          }
-        }
+        const ranked = match.fieldEntries
+          .filter((entry) => entry.rank != null && entry.rank <= 3)
+          .sort((a, b) => a.rank - b.rank || a.order - b.order);
+
+        podiumEntries = ranked.map((entry) => ({
+          label: entry.label,
+          score: entry.bestScore || 0
+        }));
+        break;
       }
     }
 
@@ -187,24 +275,10 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
           return a.finishPosition - b.finishPosition || a.lane - b.lane;
         });
 
-      for (let i = 0; i < Math.min(3, qualified.length); i++) {
-        const lane = qualified[i];
-        if (!lane.label) continue;
-
-        const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: lane.label });
-        if (!existing) {
-          const gender = await fetchGenderFromRegistration(eventId, lane.label);
-          const newEntry = new Leaderboard({
-            eventId,
-            teamOrPlayer: lane.label,
-            score: lane.finishPosition || 0,
-            gender,
-            hype: 0
-          });
-          await newEntry.save();
-          syncedCount++;
-        }
-      }
+      podiumEntries = qualified.slice(0, 3).map((lane) => ({
+        label: lane.label,
+        score: lane.finishPosition || 0
+      }));
     }
 
     // Handle single elimination and round robin - tournament winner
@@ -227,28 +301,14 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
         .sort((a, b) => b.score - a.score)
         .slice(0, 3); // top 3
 
-      for (const winner of winners) {
-        if (!winner.label) continue;
-
-        const existing = await Leaderboard.findOne({ eventId, teamOrPlayer: winner.label });
-        if (!existing) {
-          const gender = await fetchGenderFromRegistration(eventId, winner.label);
-          const newEntry = new Leaderboard({
-            eventId,
-            teamOrPlayer: winner.label,
-            score: winner.score,
-            gender,
-            hype: 0
-          });
-          await newEntry.save();
-          syncedCount++;
-        }
-      }
+      podiumEntries = winners.map((winner) => ({
+        label: winner.label,
+        score: winner.score
+      }));
     }
 
-    if (syncedCount > 0) {
-      await recalcRanks(eventId);
-    }
+    syncedCount = await syncPodiumToLeaderboard(eventId, tournament, podiumEntries);
+    await recalcRanks(eventId);
 
     return { synced: syncedCount, message: `Auto-synced ${syncedCount} tournament winner(s) to leaderboard` };
   } catch (err) {
