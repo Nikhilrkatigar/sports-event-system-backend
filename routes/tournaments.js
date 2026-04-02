@@ -5,6 +5,7 @@ const requirePermission = require('../middleware/requirePermission');
 const { emitTournamentMatchUpdate } = require('../utils/socket');
 
 const TRACK_LANE_ORDER = [4, 5, 3, 6, 2, 7, 1, 8];
+const MANUAL_BYE_VALUE = '__BYE__';
 
 // Generate lane order for any number of lanes (staggered pattern from middle outward)
 const generateLaneOrder = (laneCount) => {
@@ -36,6 +37,17 @@ const nextPowerOf2 = (n) => {
   let p = 1;
   while (p < n) p *= 2;
   return p;
+};
+
+const getDistributedByeMatchIndexes = (matchCount, byeCount) => {
+  const indexes = new Set();
+  if (matchCount <= 0 || byeCount <= 0) return indexes;
+
+  for (let i = 0; i < byeCount; i++) {
+    indexes.add(Math.floor((i * matchCount) / byeCount));
+  }
+
+  return indexes;
 };
 
 const shuffleInPlace = (items = []) => {
@@ -761,6 +773,79 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
   }
 });
 
+// Admin: Update match participant (for updating TBD entries)
+router.patch('/match/:matchId/participant', auth, requirePermission('manage_tournaments'), async (req, res) => {
+  try {
+    const { participantSlot, applicationId } = req.body; // participantSlot: 1 or 2
+    const match = await TournamentMatch.findById(req.params.matchId);
+    if (!match) return res.status(404).json({ message: 'Match not found' });
+    const tournament = await Tournament.findById(match.tournamentId);
+    if (!tournament) return res.status(404).json({ message: 'Tournament not found' });
+
+    const event = await Event.findById(match.eventId);
+    if (!event) return res.status(404).json({ message: 'Event not found' });
+
+    if (![1, 2].includes(Number(participantSlot))) {
+      return res.status(400).json({ message: 'Invalid participant slot (1 or 2)' });
+    }
+
+    const normalizedSelection = String(applicationId || '').trim();
+    const isManualBye = normalizedSelection === MANUAL_BYE_VALUE || normalizedSelection.toUpperCase() === 'BYE';
+
+    let participantId = null;
+    let label = 'BYE';
+    let uucms = '';
+    let registrationNumber = '';
+
+    if (!isManualBye) {
+      const application = await Application.findById(applicationId).populate('players');
+      if (!application) return res.status(404).json({ message: 'Team/participant not found' });
+
+      label = event.type === 'team'
+        ? (application.teamName || `Team ${application._id.toString().slice(-4)}`)
+        : (application.players?.find((p) => !p.isSubstitute)?.name || `Player ${application._id.toString().slice(-4)}`);
+
+      uucms = String(application.players?.find((p) => p.isTeamLeader && !p.isSubstitute)?.uucms ||
+                           application.players?.find((p) => !p.isSubstitute)?.uucms || '').trim().toUpperCase();
+      registrationNumber = application.registrationNumber || '';
+      participantId = application._id;
+    }
+
+    // Update the appropriate participant slot
+    if (participantSlot === 1) {
+      match.participant1Id = participantId;
+      match.participant1 = label;
+      match.participant1Uucms = uucms;
+      match.participant1RegistrationNumber = registrationNumber;
+    } else if (participantSlot === 2) {
+      match.participant2Id = participantId;
+      match.participant2 = label;
+      match.participant2Uucms = uucms;
+      match.participant2RegistrationNumber = registrationNumber;
+    }
+
+    match.updatedAt = new Date();
+    await match.save();
+
+    if (tournament.format === 'single_elimination') {
+      await resolveByeMatch(match);
+
+      const pendingMatches = await TournamentMatch.countDocuments({
+        tournamentId: match.tournamentId,
+        status: { $ne: 'completed' }
+      });
+
+      tournament.status = pendingMatches === 0 ? 'completed' : 'in_progress';
+      await tournament.save();
+    }
+
+    const allMatches = await TournamentMatch.find({ tournamentId: match.tournamentId }).sort({ round: 1, matchNumber: 1 });
+    res.json({ match, allMatches, message: `Participant ${participantSlot} updated` });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 // Admin: Delete tournament and its matches
 router.delete('/:id', auth, requirePermission('manage_tournaments'), async (req, res) => {
   try {
@@ -829,20 +914,20 @@ function generateSingleElimination(tournament, participants, eventId) {
   const n = participants.length;
   const totalSlots = nextPowerOf2(n);
   const totalRounds = Math.log2(totalSlots);
-
   const shuffledParticipants = shuffleInPlace([...participants]);
-  const seeded = [...shuffledParticipants];
-  while (seeded.length < totalSlots) {
-    seeded.push(buildByeParticipant());
-  }
-
-  shuffleInPlace(seeded);
+  const byeCount = totalSlots - n;
+  const firstRoundMatchCount = totalSlots / 2;
+  const byeMatchIndexes = getDistributedByeMatchIndexes(firstRoundMatchCount, byeCount);
 
   const matches = [];
 
-  for (let i = 0; i < totalSlots / 2; i++) {
-    const participant1 = seeded[i * 2];
-    const participant2 = seeded[i * 2 + 1];
+  let participantCursor = 0;
+  for (let i = 0; i < firstRoundMatchCount; i++) {
+    const participant1 = shuffledParticipants[participantCursor++] || buildByeParticipant();
+    const participant2 = byeMatchIndexes.has(i)
+      ? buildByeParticipant()
+      : (shuffledParticipants[participantCursor++] || buildByeParticipant());
+
     matches.push({
       eventId,
       tournamentId: tournament._id,
@@ -1018,26 +1103,7 @@ async function resolveByes(tournamentId) {
   });
 
   for (const match of byeMatches) {
-    if (match.participant1 === 'BYE' && match.participant2 === 'BYE') {
-      match.status = 'completed';
-      match.updatedAt = new Date();
-      await match.save();
-      continue;
-    }
-
-    const winnerId = match.participant1 === 'BYE' ? match.participant2Id : match.participant1Id;
-    const winner = match.participant1 === 'BYE' ? match.participant2 : match.participant1;
-    const winnerUucms = match.participant1 === 'BYE' ? match.participant2Uucms : match.participant1Uucms;
-    match.winnerId = winnerId;
-    match.winner = winner;
-    match.winnerUucms = winnerUucms || '';
-    match.score1 = match.participant1 === 'BYE' ? 0 : 1;
-    match.score2 = match.participant2 === 'BYE' ? 0 : 1;
-    match.status = 'completed';
-    match.updatedAt = new Date();
-    await match.save();
-
-    await advanceWinner(match);
+    await resolveByeMatch(match);
   }
 }
 
@@ -1070,6 +1136,44 @@ async function advanceWinner(match) {
   nextMatch.updatedAt = new Date();
 
   await nextMatch.save();
+
+  if (nextMatch.participant1 === 'BYE' || nextMatch.participant2 === 'BYE') {
+    await resolveByeMatch(nextMatch);
+  }
+}
+
+async function resolveByeMatch(match) {
+  if (!match || (match.participant1 !== 'BYE' && match.participant2 !== 'BYE')) return false;
+
+  if (match.participant1 === 'BYE' && match.participant2 === 'BYE') {
+    match.winnerId = null;
+    match.winner = null;
+    match.winnerUucms = '';
+    match.score1 = 0;
+    match.score2 = 0;
+    match.status = 'completed';
+    match.updatedAt = new Date();
+    await match.save();
+    return true;
+  }
+
+  const winnerId = match.participant1 === 'BYE' ? match.participant2Id : match.participant1Id;
+  const winner = match.participant1 === 'BYE' ? match.participant2 : match.participant1;
+  const winnerUucms = match.participant1 === 'BYE' ? match.participant2Uucms : match.participant1Uucms;
+
+  if (!winner) return false;
+
+  match.winnerId = winnerId;
+  match.winner = winner;
+  match.winnerUucms = winnerUucms || '';
+  match.score1 = match.participant1 === 'BYE' ? 0 : 1;
+  match.score2 = match.participant2 === 'BYE' ? 0 : 1;
+  match.status = 'completed';
+  match.updatedAt = new Date();
+  await match.save();
+
+  await advanceWinner(match);
+  return true;
 }
 
 // Public: Like/Unlike tournament
