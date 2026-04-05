@@ -5,6 +5,7 @@ const rateLimit = require('express-rate-limit');
 const { Admin, AuditLog } = require('../models');
 const { getCanonicalRole } = require('../utils/roles');
 const { validatePassword, getPasswordStrengthMessage } = require('../utils/passwordValidator');
+const getClientIp = require('../utils/getClientIp');
 
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
@@ -33,7 +34,7 @@ router.post('/login', authLimiter, async (req, res) => {
 
     const token = jwt.sign({ id: admin._id, name: admin.name, email: admin.email, role: admin.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
 
-    await AuditLog.create({ action: 'Admin Login', admin: admin.name, ip: req.ip });
+    await AuditLog.create({ action: 'Admin Login', admin: admin.name, ip: getClientIp(req) });
 
     res.json({
       token,
@@ -90,7 +91,7 @@ router.post('/setup', authLimiter, async (req, res) => {
 
     const admin = new Admin({ name: String(name).trim(), email, password, role: 'Super Admin' });
     await admin.save();
-    await AuditLog.create({ action: 'Initial Super Admin Created', admin: admin.name, ip: req.ip });
+    await AuditLog.create({ action: 'Initial Super Admin Created', admin: admin.name, ip: getClientIp(req) });
     res.json({ message: 'Super Admin created successfully' });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -12,7 +12,9 @@ const resolveScoreOrder = async (eventId) => {
   ]);
 
   if (tournament?.format === 'track_heats') return 'asc';
+  if (tournament?.format === 'field_flight') return 'desc';
   if (event?.eventCategory === 'track') return 'asc';
+  if (event?.eventCategory === 'field') return 'desc';
   return event?.scoreOrder === 'asc' ? 'asc' : 'desc';
 };
 
@@ -107,17 +109,11 @@ const recalcRanks = async (eventId) => {
   if (ops.length > 0) await Leaderboard.bulkWrite(ops);
 };
 
-const buildScoredScopeQuery = (eventId, tournament) => {
-  const query = {
-    eventId,
-    $or: [
-      { rank: { $ne: null } },
-      { score: { $nin: [null, 0] } }
-    ]
-  };
+const buildTournamentScopeQuery = (eventId, tournament) => {
+  const query = { eventId };
 
   if (['male', 'female'].includes(tournament?.genderFilter)) {
-    query.gender = tournament.genderFilter;
+    query.gender = { $in: [tournament.genderFilter, 'unspecified'] };
   }
 
   return query;
@@ -128,7 +124,7 @@ const syncPodiumToLeaderboard = async (eventId, tournament, podiumEntries = []) 
     return 0;
   }
 
-  const scopeQuery = buildScoredScopeQuery(eventId, tournament);
+  const scopeQuery = buildTournamentScopeQuery(eventId, tournament);
   const existingEntries = await Leaderboard.find(scopeQuery).sort({ _id: 1 });
   const existingByLabel = new Map();
 
@@ -147,13 +143,18 @@ const syncPodiumToLeaderboard = async (eventId, tournament, podiumEntries = []) 
     if (!label) continue;
 
     const matchingEntries = existingByLabel.get(label) || [];
-    const reusableEntry = matchingEntries.find((entry) => !touchedIds.has(String(entry._id)));
+    const preferredGender = ['male', 'female'].includes(tournament?.genderFilter) ? tournament.genderFilter : null;
+    const reusableEntry = matchingEntries.find((entry) => !touchedIds.has(String(entry._id)) && (!preferredGender || entry.gender === preferredGender))
+      || matchingEntries.find((entry) => !touchedIds.has(String(entry._id)) && entry.gender === 'unspecified')
+      || matchingEntries.find((entry) => !touchedIds.has(String(entry._id)));
     const gender = ['male', 'female'].includes(tournament?.genderFilter)
       ? tournament.genderFilter
       : await fetchGenderFromRegistration(eventId, label);
+    const numericScore = Number(podiumEntry.score);
+    const normalizedScore = Number.isFinite(numericScore) ? numericScore : 0;
 
     if (reusableEntry) {
-      reusableEntry.score = podiumEntry.score;
+      reusableEntry.score = normalizedScore;
       reusableEntry.gender = gender;
       reusableEntry.rank = null;
       reusableEntry.updatedAt = new Date();
@@ -171,7 +172,7 @@ const syncPodiumToLeaderboard = async (eventId, tournament, podiumEntries = []) 
       const created = await Leaderboard.create({
         eventId,
         teamOrPlayer: label,
-        score: podiumEntry.score,
+        score: normalizedScore,
         gender,
         hype: 0
       });
@@ -231,7 +232,7 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
 
         podiumEntries = ranked.map((entry) => ({
           label: entry.label,
-          score: entry.bestScore || 0
+          score: Number(entry.bestScore ?? entry.performance ?? 0)
         }));
         break;
       }
@@ -277,7 +278,7 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
 
       podiumEntries = qualified.slice(0, 3).map((lane) => ({
         label: lane.label,
-        score: lane.finishPosition || 0
+        score: Number(lane.finishPosition || 0)
       }));
     }
 
@@ -303,7 +304,7 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
 
       podiumEntries = winners.map((winner) => ({
         label: winner.label,
-        score: winner.score
+        score: Number(winner.score || 0)
       }));
     }
 
@@ -314,6 +315,21 @@ const syncTournamentToLeaderboard = async (eventId, options = {}) => {
   } catch (err) {
     console.error('Error syncing tournament to leaderboard:', err);
     return { synced: 0, message: `Sync error: ${err.message}` };
+  }
+};
+
+const refreshLeaderboardFromTournaments = async () => {
+  const tournaments = await Tournament.find({ status: { $in: ['in_progress', 'completed'] } })
+    .select('_id eventId genderFilter updatedAt createdAt')
+    .sort({ updatedAt: -1, createdAt: -1 });
+
+  const seenScopes = new Set();
+
+  for (const tournament of tournaments) {
+    const scopeKey = `${String(tournament.eventId)}:${tournament.genderFilter || 'all'}`;
+    if (seenScopes.has(scopeKey)) continue;
+    seenScopes.add(scopeKey);
+    await syncTournamentToLeaderboard(String(tournament.eventId), { tournamentId: tournament._id });
   }
 };
 
@@ -340,6 +356,9 @@ router.post('/sync-tournament/:eventId', auth, requirePermission('manage_leaderb
 
 router.get('/', async (req, res) => {
   try {
+    if (req.query.refresh === '1') {
+      await refreshLeaderboardFromTournaments();
+    }
     const data = await Leaderboard.find().populate('eventId', 'title').sort({ rank: 1 });
     res.json(data);
   } catch (err) { res.status(500).json({ message: err.message }); }

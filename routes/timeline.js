@@ -2,6 +2,7 @@ const router = require('express').Router();
 const { TimelineItem, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const getClientIp = require('../utils/getClientIp');
 
 console.log('Timeline route loading... TimelineItem model:', typeof TimelineItem);
 
@@ -37,7 +38,7 @@ router.post('/', auth, requirePermission('manage_events'), async (req, res) => {
     if (!time || !title) return res.status(400).json({ message: 'time and title are required' });
     const item = new TimelineItem({ time, title, description, icon, color, isPublic, order });
     await item.save();
-    await AuditLog.create({ action: `Timeline Item Created: ${title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Timeline Item Created: ${title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.status(201).json(item);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -54,7 +55,7 @@ router.put('/:id', auth, requirePermission('manage_events'), async (req, res) =>
       { new: true, runValidators: true }
     );
     if (!item) return res.status(404).json({ message: 'Timeline item not found' });
-    await AuditLog.create({ action: `Timeline Item Updated: ${item.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Timeline Item Updated: ${item.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json(item);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -69,7 +70,7 @@ router.patch('/:id/toggle-visibility', auth, requirePermission('manage_events'),
     item.isPublic = !item.isPublic;
     await item.save();
     const status = item.isPublic ? 'shown' : 'hidden';
-    await AuditLog.create({ action: `Timeline Item ${status}: ${item.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Timeline Item ${status}: ${item.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json(item);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -81,7 +82,7 @@ router.delete('/:id', auth, requirePermission('manage_events'), async (req, res)
   try {
     const item = await TimelineItem.findByIdAndDelete(req.params.id);
     if (!item) return res.status(404).json({ message: 'Timeline item not found' });
-    await AuditLog.create({ action: `Timeline Item Deleted: ${item.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Timeline Item Deleted: ${item.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json({ message: 'Timeline item deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });

@@ -7,6 +7,8 @@ const fs = require('fs');
 const { Application, Event, AuditLog, Tournament, TournamentMatch, Leaderboard } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const { hasFullCmsAccess } = require('../utils/roles');
+const getClientIp = require('../utils/getClientIp');
 const {
   getMainPlayerCount,
   getRegistrationState,
@@ -768,7 +770,7 @@ router.patch('/:id', auth, requirePermission('manage_registrations'), async (req
     await AuditLog.create({
       action: `Team Name Updated: ${application.teamName}`,
       admin: req.admin.name,
-      ip: req.ip
+      ip: getClientIp(req)
     });
 
     res.json({ message: 'Team name updated', teamName: application.teamName });
@@ -778,6 +780,53 @@ router.patch('/:id', auth, requirePermission('manage_registrations'), async (req
 });
 
 // Admin: Delete registration
+router.delete('/admin/all', auth, requirePermission('manage_registrations'), async (req, res) => {
+  try {
+    if (!hasFullCmsAccess(req.admin?.role)) {
+      return res.status(403).json({ message: 'Only full admins can delete all registrations' });
+    }
+
+    const { eventId } = req.query;
+    const query = eventId ? { eventId } : {};
+    const applications = await Application.find(query).select('_id eventId');
+
+    if (applications.length === 0) {
+      return res.status(404).json({ message: 'No registrations found for deletion' });
+    }
+
+    const eventIds = [...new Set(applications.map((application) => String(application.eventId)).filter(Boolean))];
+    const tournamentExists = await Tournament.exists({ eventId: { $in: eventIds } });
+    if (tournamentExists) {
+      return res.status(400).json({ message: 'Cannot bulk delete registrations for events that already have tournament brackets' });
+    }
+
+    await Application.deleteMany(query);
+
+    const affectedEvents = await Event.find({ _id: { $in: eventIds } });
+    for (const event of affectedEvents) {
+      const counts = await getEventRegistrationCounts(event._id);
+      if (event.status === 'full') {
+        event.registrationOpen = true;
+      }
+      await syncEventRegistrationStatus(event, counts);
+    }
+
+    await AuditLog.create({
+      action: eventId ? `All Registrations Deleted For Event ${eventId}` : 'All Registrations Deleted',
+      admin: req.admin.name,
+      ip: getClientIp(req)
+    });
+
+    res.json({
+      message: eventId
+        ? `Deleted ${applications.length} registrations for the selected event`
+        : `Deleted ${applications.length} registrations`
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 router.delete('/:id', auth, requirePermission('manage_registrations'), async (req, res) => {
   try {
     const application = await Application.findById(req.params.id);
@@ -798,7 +847,7 @@ router.delete('/:id', auth, requirePermission('manage_registrations'), async (re
       await syncEventRegistrationStatus(event, counts);
     }
 
-    await AuditLog.create({ action: 'Application Deleted', admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: 'Application Deleted', admin: req.admin.name, ip: getClientIp(req) });
     res.json({ message: 'Registration deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -1159,6 +1208,511 @@ router.patch('/:id/players/:playerId/role', auth, requirePermission('manage_regi
     await application.save();
     res.json({ message: 'Player role updated', player });
   } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Admin: Export full dashboard report as PDF
+router.get('/export/dashboard-pdf', auth, requirePermission('view_dashboard'), async (req, res) => {
+  try {
+    const PDFDocument = require('pdfkit');
+
+    // Fetch all required data in parallel
+    const [events, applications, leaderboards, generalChampionship, auditLogs] = await Promise.all([
+      Event.find().sort({ date: -1 }).lean(),
+      Application.find().populate('eventId', 'title type').lean(),
+      Leaderboard.find().populate('eventId', 'title type').lean(),
+      require('../models').GeneralChampionship.findOne().lean(),
+      AuditLog.find().sort({ createdAt: -1 }).limit(50).lean()
+    ]);
+
+    // Calculate statistics
+    const totalRegistrations = applications.length;
+    const totalTeams = applications.filter(a => a.teamId).length;
+    const totalEvents = events.length;
+    const openEvents = events.filter(e => e.status === 'open').length;
+    const fullEvents = events.filter(e => e.status === 'full').length;
+    const completedEvents = events.filter(e => e.status === 'completed').length;
+
+    let totalPlayers = 0;
+    let checkedIn = 0;
+    const departmentStats = {};
+    const genderStats = { male: 0, female: 0, unspecified: 0 };
+
+    applications.forEach(app => {
+      app.players.forEach(player => {
+        totalPlayers++;
+        if (player.checkInStatus) checkedIn++;
+        
+        // Department stats
+        const dept = player.department || 'Unknown';
+        departmentStats[dept] = (departmentStats[dept] || 0) + 1;
+        
+        // Gender stats
+        const gender = player.gender || 'unspecified';
+        genderStats[gender] = (genderStats[gender] || 0) + 1;
+      });
+    });
+
+    // Create PDF document
+    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const chunks = [];
+    
+    doc.on('data', chunk => chunks.push(chunk));
+    doc.on('end', () => {
+      const buffer = Buffer.concat(chunks);
+      res.setHeader('Content-Disposition', `attachment; filename="Dashboard_Report_${new Date().toISOString().split('T')[0]}.pdf"`);
+      res.setHeader('Content-Type', 'application/pdf');
+      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+      res.send(buffer);
+    });
+
+    // Helper functions for PDF
+    const drawSectionHeader = (title, yPos) => {
+      doc.fillColor('#1a365d')
+         .fontSize(14)
+         .font('Helvetica-Bold')
+         .text(title, 40, yPos);
+      doc.moveTo(40, yPos + 18).lineTo(555, yPos + 18).strokeColor('#3182ce').lineWidth(1).stroke();
+      return yPos + 30;
+    };
+
+    const drawStatBox = (label, value, x, y, width = 120) => {
+      doc.rect(x, y, width, 50).fillColor('#f7fafc').fill();
+      doc.rect(x, y, width, 50).strokeColor('#e2e8f0').lineWidth(1).stroke();
+      doc.fillColor('#2d3748').fontSize(10).font('Helvetica').text(label, x + 10, y + 8, { width: width - 20, align: 'center' });
+      doc.fillColor('#1a365d').fontSize(18).font('Helvetica-Bold').text(String(value), x + 10, y + 25, { width: width - 20, align: 'center' });
+    };
+
+    const checkPageBreak = (neededSpace = 100) => {
+      if (doc.y > 750 - neededSpace) {
+        doc.addPage();
+        return 50;
+      }
+      return doc.y;
+    };
+
+    // Title
+    doc.fillColor('#1a365d')
+       .fontSize(24)
+       .font('Helvetica-Bold')
+       .text('Sports Event Dashboard Report', { align: 'center' });
+    
+    doc.fontSize(10)
+       .font('Helvetica')
+       .fillColor('#718096')
+       .text(`Generated on: ${new Date().toLocaleString()}`, { align: 'center' });
+    
+    doc.moveDown(1.5);
+
+    // Overview Statistics Section
+    let y = drawSectionHeader('Overview Statistics', doc.y);
+    
+    // Row 1 - Main stats
+    drawStatBox('Total Events', totalEvents, 40, y);
+    drawStatBox('Open Events', openEvents, 170, y);
+    drawStatBox('Completed', completedEvents, 300, y);
+    drawStatBox('Full Events', fullEvents, 430, y);
+    
+    y += 60;
+    
+    // Row 2 - Registration stats
+    drawStatBox('Registrations', totalRegistrations, 40, y);
+    drawStatBox('Total Teams', totalTeams, 170, y);
+    drawStatBox('Total Players', totalPlayers, 300, y);
+    drawStatBox('Checked-In', checkedIn, 430, y);
+    
+    doc.y = y + 70;
+
+    // Gender Distribution
+    y = drawSectionHeader('Gender Distribution', doc.y);
+    drawStatBox('Male', genderStats.male, 40, y, 160);
+    drawStatBox('Female', genderStats.female, 220, y, 160);
+    drawStatBox('Others', genderStats.unspecified, 400, y, 155);
+    doc.y = y + 70;
+
+    // Department-wise Registration
+    y = checkPageBreak(200);
+    y = drawSectionHeader('Department-wise Registrations', y);
+    
+    const deptEntries = Object.entries(departmentStats).sort((a, b) => b[1] - a[1]);
+    doc.fontSize(9).font('Helvetica');
+    
+    // Table header
+    doc.fillColor('#1a365d').font('Helvetica-Bold');
+    doc.text('Department', 40, y, { width: 300 });
+    doc.text('Players', 400, y, { width: 100, align: 'right' });
+    y += 15;
+    doc.moveTo(40, y).lineTo(555, y).strokeColor('#e2e8f0').stroke();
+    y += 5;
+    
+    doc.font('Helvetica').fillColor('#2d3748');
+    deptEntries.forEach(([dept, count], index) => {
+      y = checkPageBreak(20);
+      if (index % 2 === 0) {
+        doc.rect(40, y - 2, 515, 15).fillColor('#f7fafc').fill();
+      }
+      doc.fillColor('#2d3748');
+      doc.text(dept, 40, y, { width: 300 });
+      doc.text(String(count), 400, y, { width: 100, align: 'right' });
+      y += 15;
+    });
+    doc.y = y + 10;
+
+    // Event Details Section
+    doc.addPage();
+    y = drawSectionHeader('Event Details', 50);
+    
+    events.forEach((event, index) => {
+      y = checkPageBreak(100);
+      
+      // Event registration counts
+      const eventApps = applications.filter(a => String(a.eventId?._id || a.eventId) === String(event._id));
+      const teamCount = eventApps.length;
+      const playerCount = eventApps.reduce((sum, app) => sum + app.players.filter(p => !p.isSubstitute).length, 0);
+      const eventCheckedIn = eventApps.reduce((sum, app) => sum + app.players.filter(p => p.checkInStatus).length, 0);
+      
+      // Event box
+      doc.rect(40, y, 515, 70).fillColor('#f7fafc').fill();
+      doc.rect(40, y, 515, 70).strokeColor('#e2e8f0').stroke();
+      
+      // Event title and status
+      doc.fillColor('#1a365d').fontSize(12).font('Helvetica-Bold');
+      doc.text(`${index + 1}. ${event.title}`, 50, y + 8);
+      
+      // Status badge
+      const statusColors = { open: '#38a169', full: '#e53e3e', completed: '#3182ce', draft: '#718096' };
+      doc.rect(480, y + 6, 65, 18).fillColor(statusColors[event.status] || '#718096').fill();
+      doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
+      doc.text(event.status?.toUpperCase() || 'N/A', 485, y + 10, { width: 55, align: 'center' });
+      
+      // Event details
+      doc.fillColor('#4a5568').fontSize(9).font('Helvetica');
+      doc.text(`Type: ${event.type === 'team' ? 'Team Event' : 'Individual'}`, 50, y + 28);
+      doc.text(`Date: ${event.date ? new Date(event.date).toLocaleDateString() : 'TBD'}`, 200, y + 28);
+      doc.text(`Max Participants: ${event.maxParticipants || 'Unlimited'}`, 350, y + 28);
+      
+      doc.text(`Registrations: ${teamCount}`, 50, y + 42);
+      doc.text(`Players: ${playerCount}`, 200, y + 42);
+      doc.text(`Checked-In: ${eventCheckedIn}`, 350, y + 42);
+      
+      if (event.registrationFee) {
+        doc.text(`Fee: ₹${event.registrationFee}`, 50, y + 56);
+      }
+      
+      y += 80;
+    });
+
+    // Leaderboard / Rankings Section - Show top 3 per gender
+    doc.addPage();
+    y = drawSectionHeader('Event Rankings & Leaderboard', 50);
+    
+    // Group leaderboard by event
+    const leaderboardByEvent = {};
+    leaderboards.forEach(lb => {
+      const eventId = String(lb.eventId?._id || lb.eventId);
+      if (!leaderboardByEvent[eventId]) {
+        leaderboardByEvent[eventId] = {
+          title: lb.eventId?.title || 'Unknown Event',
+          entries: []
+        };
+      }
+      leaderboardByEvent[eventId].entries.push(lb);
+    });
+
+    Object.values(leaderboardByEvent).forEach((eventLb, eventIndex) => {
+      y = checkPageBreak(150);
+      
+      // Add separator between events (not before first event)
+      if (eventIndex > 0) {
+        y += 15;
+        doc.moveTo(40, y).lineTo(540, y).strokeColor('#e0e7ff').lineWidth(1).stroke();
+        y += 15;
+      }
+      
+      doc.fillColor('#1a365d').fontSize(12).font('Helvetica-Bold');
+      doc.text(eventLb.title, 40, y);
+      y += 18;
+      
+      // Group entries by gender and get top 3 for each gender
+      const entriesByGender = {};
+      eventLb.entries.forEach(entry => {
+        const gender = entry.gender || 'unspecified';
+        if (!entriesByGender[gender]) entriesByGender[gender] = [];
+        entriesByGender[gender].push(entry);
+      });
+      
+      // Sort by rank within each gender and take top 3
+      const genderOrder = ['male', 'female', 'unspecified'];
+      let hasRankings = false;
+      
+      genderOrder.forEach(gender => {
+        if (!entriesByGender[gender] || entriesByGender[gender].length === 0) return;
+        
+        const topEntries = entriesByGender[gender]
+          .filter(e => e.rank && e.rank <= 3)
+          .sort((a, b) => a.rank - b.rank);
+        
+        if (topEntries.length > 0) {
+          hasRankings = true;
+          y = checkPageBreak(90);
+          
+          // Add space before gender subheader
+          y += 12;
+          
+          // Gender subheader - larger and bolder
+          doc.fillColor('#4a5568').fontSize(10).font('Helvetica-Bold');
+          doc.text(`${formatGender(gender)} Division`, 50, y);
+          y += 14;
+          
+          // Entries for this gender
+          doc.font('Helvetica').fillColor('#2d3748').fontSize(9);
+          topEntries.forEach((entry, idx) => {
+            y = checkPageBreak(22);
+            
+            const medalColors = { 1: '#ffd700', 2: '#c0c0c0', 3: '#cd7f32' };
+            const rankColors = { 1: '#333333', 2: '#555555', 3: '#777777' };
+            
+            if (medalColors[entry.rank]) {
+              // Draw medal circle for top 3
+              doc.circle(55, y + 5, 8).fillColor(medalColors[entry.rank]).fill();
+              doc.fillColor('#ffffff').fontSize(9).font('Helvetica-Bold');
+              doc.text(String(entry.rank), 51, y + 2, { width: 8, align: 'center' });
+            } else {
+              doc.fillColor(rankColors[entry.rank] || '#2d3748').fontSize(9).font('Helvetica-Bold');
+              doc.text(String(entry.rank), 50, y, { width: 50 });
+            }
+            
+            doc.fillColor('#2d3748').fontSize(9).font('Helvetica');
+            doc.text(entry.teamOrPlayer, 100, y, { width: 250 });
+            doc.text(entry.score !== null ? String(entry.score) : '-', 360, y, { width: 80, align: 'right' });
+            y += 18;
+          });
+          y += 10;
+        }
+      });
+      
+      if (!hasRankings) {
+        doc.fillColor('#718096').fontSize(9).font('Helvetica');
+        doc.text('No rankings yet', 50, y);
+        y += 20;
+      }
+      y += 15;
+    });
+
+    // General Championship Section
+    if (generalChampionship && generalChampionship.departmentScores) {
+      doc.addPage();
+      y = drawSectionHeader('General Championship Standings', 50);
+      
+      const deptScores = Object.entries(generalChampionship.departmentScores)
+        .sort((a, b) => b[1] - a[1]);
+      
+      // Header
+      doc.fillColor('#4a5568').fontSize(10).font('Helvetica-Bold');
+      doc.text('Rank', 50, y, { width: 50 });
+      doc.text('Department', 110, y, { width: 300 });
+      doc.text('Total Points', 420, y, { width: 100, align: 'right' });
+      y += 15;
+      doc.moveTo(50, y).lineTo(540, y).strokeColor('#cbd5e0').lineWidth(1).stroke();
+      y += 8;
+      
+      deptScores.forEach(([dept, score], index) => {
+        y = checkPageBreak(30);
+        
+        // Highlight top 3
+        if (index < 3) {
+          const bgColors = ['#fef3c7', '#f3f4f6', '#fed7aa'];
+          doc.rect(45, y - 3, 500, 22).fillColor(bgColors[index]).fill();
+        }
+        
+        doc.fillColor('#1a365d').fontSize(10).font('Helvetica-Bold');
+        doc.text(String(index + 1), 50, y, { width: 50 });
+        doc.fillColor('#2d3748').font('Helvetica');
+        doc.text(dept, 110, y, { width: 300 });
+        doc.fillColor('#1a365d').font('Helvetica-Bold');
+        doc.text(String(score), 420, y, { width: 100, align: 'right' });
+        y += 22;
+      });
+    }
+
+    // All Registrations Summary - Group by event with PROPER spacing
+    doc.addPage();
+    y = drawSectionHeader('Complete Registrations List', 50);
+    
+    // Group registrations by event
+    const regsByEvent = {};
+    applications.forEach(app => {
+      const eventTitle = app.eventId?.title || 'Unknown';
+      if (!regsByEvent[eventTitle]) regsByEvent[eventTitle] = [];
+      
+      app.players.forEach((player) => {
+        regsByEvent[eventTitle].push({
+          registrationNumber: app.registrationNumber || 'N/A',
+          teamName: app.teamName || '-',
+          playerName: player.name,
+          uucms: player.uucms || '-',
+          phone: player.phone || '-',
+          department: player.department || '-',
+          role: player.isTeamLeader ? 'Leader' : player.isSubstitute ? 'Sub' : 'Player',
+          checkedIn: player.checkInStatus ? 'Yes' : 'No'
+        });
+      });
+    });
+
+    // Display registrations event by event with IMPROVED spacing
+    Object.entries(regsByEvent).forEach(([eventTitle, players], eventIdx) => {
+      y = checkPageBreak(100);
+      
+      // Event header with spacing
+      doc.fillColor('#1a365d').fontSize(11).font('Helvetica-Bold');
+      doc.text(`${eventTitle}`, 40, y);
+      doc.fillColor('#718096').fontSize(8).font('Helvetica');
+      doc.text(`Total: ${players.length} registrations`, 350, y);
+      y += 18;
+      
+      // Column headers with better spacing
+      doc.fillColor('#4a5568').fontSize(8).font('Helvetica-Bold');
+      doc.text('Reg#', 40, y, { width: 50 });
+      doc.text('Player Name', 95, y, { width: 100 });
+      doc.text('UUCMS', 200, y, { width: 65 });
+      doc.text('Phone', 270, y, { width: 75 });
+      doc.text('Department', 350, y, { width: 85 });
+      doc.text('Status', 485, y, { width: 50, align: 'center' });
+      y += 11;
+      doc.moveTo(40, y).lineTo(550, y).strokeColor('#cbd5e0').lineWidth(1).stroke();
+      y += 8;
+      
+      // Player rows for this event with better spacing
+      doc.font('Helvetica').fontSize(7);
+      players.forEach((player, idx) => {
+        y = checkPageBreak(16);
+        
+        // Alternating background - taller rows
+        if (idx % 2 === 0) {
+          doc.rect(40, y - 2, 510, 14).fillColor('#f7fafc').fill();
+        }
+        
+        doc.fillColor('#2d3748');
+        
+        // Reg# - Column 1
+        doc.text(String(player.registrationNumber).substring(0, 12), 40, y, { 
+          width: 50,
+          truncate: true
+        });
+        
+        // Player Name - Column 2
+        doc.text(String(player.playerName).substring(0, 22), 95, y, { 
+          width: 100,
+          truncate: true
+        });
+        
+        // UUCMS - Column 3
+        doc.text(String(player.uucms).substring(0, 15), 200, y, { 
+          width: 65,
+          truncate: true
+        });
+        
+        // Phone - Column 4
+        doc.text(String(player.phone).substring(0, 15), 270, y, { 
+          width: 75,
+          truncate: true
+        });
+        
+        // Department - Column 5
+        doc.text(String(player.department).substring(0, 18), 350, y, { 
+          width: 85,
+          truncate: true
+        });
+        
+        // Check-in status - Column 6 with color
+        const checkInColor = player.checkedIn === 'Yes' ? '#10b981' : '#ef4444';
+        doc.fillColor(checkInColor).fontSize(7).font('Helvetica-Bold');
+        doc.text(player.checkedIn, 485, y, { width: 50, align: 'center' });
+        
+        y += 14;
+      });
+      
+      y += 12;
+    });
+
+    // Audit Logs Section
+    doc.addPage();
+    y = drawSectionHeader('Audit Logs', 50);
+    
+    if (!auditLogs || auditLogs.length === 0) {
+      doc.fillColor('#718096').fontSize(10).font('Helvetica');
+      doc.text('No audit logs available', 50, y);
+    } else {
+      // Table headers
+      doc.fillColor('#4a5568').fontSize(8).font('Helvetica-Bold');
+      doc.text('Action', 40, y, { width: 120 });
+      doc.text('Admin', 160, y, { width: 140 });
+      doc.text('Timestamp', 300, y, { width: 120 });
+      doc.text('IP Address', 420, y, { width: 120 });
+      y += 11;
+      doc.moveTo(40, y).lineTo(550, y).strokeColor('#cbd5e0').lineWidth(1).stroke();
+      y += 8;
+      
+      // Audit log rows
+      doc.font('Helvetica').fontSize(7);
+      auditLogs.forEach((log, idx) => {
+        y = checkPageBreak(14);
+        
+        // Alternating background
+        if (idx % 2 === 0) {
+          doc.rect(40, y - 2, 510, 12).fillColor('#f7fafc').fill();
+        }
+        
+        doc.fillColor('#2d3748');
+        
+        // Action
+        doc.text(String(log.action || '-').substring(0, 20), 40, y, { 
+          width: 120,
+          truncate: true
+        });
+        
+        // Admin name
+        doc.text(String(log.admin || '-').substring(0, 25), 160, y, { 
+          width: 140,
+          truncate: true
+        });
+        
+        // Timestamp
+        const timestamp = log.createdAt ? new Date(log.createdAt).toLocaleString() : log.timestamp || '-';
+        doc.text(timestamp.substring(0, 20), 300, y, { 
+          width: 120,
+          truncate: true
+        });
+        
+        // IP Address - show properly formatted
+        let ipAddress = log.ip || '-';
+        // Convert IPv6 localhost to readable format
+        if (ipAddress === '::1' || ipAddress === '::ffff:127.0.0.1') {
+          ipAddress = 'Localhost';
+        } else if (ipAddress === '127.0.0.1') {
+          ipAddress = 'Localhost';
+        }
+        doc.text(ipAddress.substring(0, 18), 420, y, { 
+          width: 120,
+          truncate: true
+        });
+        
+        y += 12;
+      });
+    }
+
+    // Footer on last page
+    doc.fontSize(8).fillColor('#718096').font('Helvetica');
+    doc.text(
+      `Sports Event Management System | Report generated on ${new Date().toLocaleString()}`,
+      40, 780,
+      { align: 'center', width: 515 }
+    );
+
+    doc.end();
+  } catch (err) {
+    console.error('PDF export error:', err);
     res.status(500).json({ message: err.message });
   }
 });

@@ -5,6 +5,7 @@ const fs = require('fs');
 const { Settings, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const getClientIp = require('../utils/getClientIp');
 
 const storage = multer.diskStorage({
   destination: (req, file, cb) => {
@@ -49,7 +50,7 @@ router.put('/', auth, requirePermission('manage_settings'), upload.single('colle
     if (!settings) settings = new Settings(data);
     else Object.assign(settings, data);
     await settings.save();
-    await AuditLog.create({ action: 'Settings Updated', admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: 'Settings Updated', admin: req.admin.name, ip: getClientIp(req) });
     res.json(settings);
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

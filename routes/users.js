@@ -4,6 +4,7 @@ const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { ROLE_DEFINITIONS, isValidCmsRole, getCanonicalRole } = require('../utils/roles');
 const { validatePassword, getPasswordStrengthMessage } = require('../utils/passwordValidator');
+const getClientIp = require('../utils/getClientIp');
 
 router.get('/roles', auth, requirePermission('manage_users'), (req, res) => {
   res.json(ROLE_DEFINITIONS.map(({ key, label, description }) => ({ key, label, description })));
@@ -52,7 +53,7 @@ router.post('/', auth, requirePermission('manage_users'), async (req, res) => {
     await AuditLog.create({
       action: `User Created: ${user.name} (${user.role})`,
       admin: req.admin.name,
-      ip: req.ip
+      ip: getClientIp(req)
     });
 
     const safeUser = await Admin.findById(user._id).select('-password').lean();

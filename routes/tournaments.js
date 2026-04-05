@@ -3,6 +3,7 @@ const { Tournament, TournamentMatch, Application, Event, AuditLog } = require('.
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { emitTournamentMatchUpdate } = require('../utils/socket');
+const getClientIp = require('../utils/getClientIp');
 
 const TRACK_LANE_ORDER = [4, 5, 3, 6, 2, 7, 1, 8];
 const MANUAL_BYE_VALUE = '__BYE__';
@@ -543,7 +544,7 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
     await AuditLog.create({
       action: `Tournament Generated: ${event.title} (${format})`,
       admin: req.admin.name,
-      ip: req.ip
+      ip: getClientIp(req)
     });
 
     res.status(201).json({ tournament: hydrateTournament(tournament), matches: savedMatches });
@@ -858,7 +859,7 @@ router.delete('/:id', auth, requirePermission('manage_tournaments'), async (req,
     await AuditLog.create({
       action: `Tournament Deleted for event ${tournament.eventId}`,
       admin: req.admin.name,
-      ip: req.ip
+      ip: getClientIp(req)
     });
 
     res.json({ message: 'Tournament deleted' });
@@ -895,7 +896,7 @@ router.post('/:tournamentId/generate-qualifications', auth, requirePermission('m
     await AuditLog.create({
       action: `Qualification Heats Generated: ${tournament.eventId} (Round ${qualificationRound.newRound})`,
       admin: req.admin.name,
-      ip: req.ip
+      ip: getClientIp(req)
     });
 
     res.status(201).json({

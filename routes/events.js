@@ -6,6 +6,7 @@ const XLSX = require('xlsx');
 const { Event, Application, AuditLog, Tournament } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const getClientIp = require('../utils/getClientIp');
 const {
   getRegistrationState,
   getNormalizedEventPayload,
@@ -228,7 +229,7 @@ router.post('/', auth, requirePermission('manage_events'), uploadFields, async (
     const event = new Event(data);
     await event.save();
     await syncEventRegistrationStatus(event, { teamCount: 0, playerCount: 0 });
-    await AuditLog.create({ action: `Event Created: ${event.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Event Created: ${event.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.status(201).json(event);
   } catch (err) {
     // Handle multer errors
@@ -253,7 +254,7 @@ router.put('/:id', auth, requirePermission('manage_events'), uploadFields, async
     if (!event) return res.status(404).json({ message: 'Event not found' });
     const eventCounts = await getEventCounts([event._id]);
     await syncEventRegistrationStatus(event, eventCounts.get(String(event._id)));
-    await AuditLog.create({ action: `Event Updated: ${event.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Event Updated: ${event.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json(event);
   } catch (err) {
     // Handle multer errors
@@ -287,7 +288,7 @@ router.patch('/:id/toggle-registration', auth, requirePermission('manage_events'
     }
     await event.save();
     const status = event.registrationOpen ? 'opened' : 'closed';
-    await AuditLog.create({ action: `Registration ${status}: ${event.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Registration ${status}: ${event.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json(event);
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -309,7 +310,7 @@ router.delete('/:id', auth, requirePermission('manage_events'), async (req, res)
 
     const event = await Event.findByIdAndDelete(req.params.id);
     if (!event) return res.status(404).json({ message: 'Event not found' });
-    await AuditLog.create({ action: `Event Deleted: ${event.title}`, admin: req.admin.name, ip: req.ip });
+    await AuditLog.create({ action: `Event Deleted: ${event.title}`, admin: req.admin.name, ip: getClientIp(req) });
     res.json({ message: 'Event deleted' });
   } catch (err) {
     res.status(500).json({ message: err.message });
