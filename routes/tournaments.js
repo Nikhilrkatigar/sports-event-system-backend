@@ -355,6 +355,49 @@ router.get('/event/:eventId', async (req, res) => {
     if (genderFilter) {
       const tournament = tournaments[0];
       let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+      
+      // For single elimination and round robin, enrich with player details
+      if (tournament.format === 'single_elimination' || tournament.format === 'round_robin') {
+        const applicationIds = new Set();
+        matches.forEach((match) => {
+          if (match.participant1Id) applicationIds.add(match.participant1Id.toString());
+          if (match.participant2Id) applicationIds.add(match.participant2Id.toString());
+        });
+
+        if (applicationIds.size > 0) {
+          const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } })
+            .select('_id teamName teamId players registrationNumber');
+          
+          const appMap = new Map();
+          applications.forEach((app) => {
+            appMap.set(app._id.toString(), app);
+          });
+
+          matches = matches.map((match) => {
+            const matchObj = match.toObject ? match.toObject() : match;
+            if (matchObj.participant1Id) {
+              const app = appMap.get(matchObj.participant1Id.toString());
+              if (app) {
+                matchObj.participant1TeamDetails = {
+                  teamName: app.teamName || app.teamId,
+                  players: app.players || []
+                };
+              }
+            }
+            if (matchObj.participant2Id) {
+              const app = appMap.get(matchObj.participant2Id.toString());
+              if (app) {
+                matchObj.participant2TeamDetails = {
+                  teamName: app.teamName || app.teamId,
+                  players: app.players || []
+                };
+              }
+            }
+            return matchObj;
+          });
+        }
+      }
+      
       matches = await enrichFieldEntriesWithUucms(matches);
       return res.json({ tournament: hydrateTournament(tournament), matches });
     }
@@ -363,6 +406,49 @@ router.get('/event/:eventId', async (req, res) => {
     const allTournaments = [];
     for (const tournament of tournaments) {
       let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
+      
+      // For single elimination and round robin, enrich with player details
+      if (tournament.format === 'single_elimination' || tournament.format === 'round_robin') {
+        const applicationIds = new Set();
+        matches.forEach((match) => {
+          if (match.participant1Id) applicationIds.add(match.participant1Id.toString());
+          if (match.participant2Id) applicationIds.add(match.participant2Id.toString());
+        });
+
+        if (applicationIds.size > 0) {
+          const applications = await Application.find({ _id: { $in: Array.from(applicationIds) } })
+            .select('_id teamName teamId players registrationNumber');
+          
+          const appMap = new Map();
+          applications.forEach((app) => {
+            appMap.set(app._id.toString(), app);
+          });
+
+          matches = matches.map((match) => {
+            const matchObj = match.toObject ? match.toObject() : match;
+            if (matchObj.participant1Id) {
+              const app = appMap.get(matchObj.participant1Id.toString());
+              if (app) {
+                matchObj.participant1TeamDetails = {
+                  teamName: app.teamName || app.teamId,
+                  players: app.players || []
+                };
+              }
+            }
+            if (matchObj.participant2Id) {
+              const app = appMap.get(matchObj.participant2Id.toString());
+              if (app) {
+                matchObj.participant2TeamDetails = {
+                  teamName: app.teamName || app.teamId,
+                  players: app.players || []
+                };
+              }
+            }
+            return matchObj;
+          });
+        }
+      }
+      
       matches = await enrichFieldEntriesWithUucms(matches);
       allTournaments.push({ tournament: hydrateTournament(tournament), matches });
     }

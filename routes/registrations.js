@@ -1218,12 +1218,11 @@ router.get('/export/dashboard-pdf', auth, requirePermission('view_dashboard'), a
     const PDFDocument = require('pdfkit');
 
     // Fetch all required data in parallel
-    const [events, applications, leaderboards, generalChampionship, auditLogs] = await Promise.all([
+    const [events, applications, leaderboards, generalChampionship] = await Promise.all([
       Event.find().sort({ date: -1 }).lean(),
       Application.find().populate('eventId', 'title type').lean(),
       Leaderboard.find().populate('eventId', 'title type').lean(),
-      require('../models').GeneralChampionship.findOne().lean(),
-      AuditLog.find().sort({ createdAt: -1 }).limit(50).lean()
+      require('../models').GeneralChampionship.findOne().lean()
     ]);
 
     // Calculate statistics
@@ -1255,16 +1254,37 @@ router.get('/export/dashboard-pdf', auth, requirePermission('view_dashboard'), a
     });
 
     // Create PDF document
-    const doc = new PDFDocument({ margin: 40, size: 'A4' });
+    const doc = new PDFDocument({ margin: 40, size: 'A4', bufferPages: true });
     const chunks = [];
     
-    doc.on('data', chunk => chunks.push(chunk));
+    let hasError = false;
+    
+    doc.on('data', chunk => {
+      if (!hasError) chunks.push(chunk);
+    });
+    
+    doc.on('error', (err) => {
+      hasError = true;
+      console.error('PDF Document error:', err);
+      if (!res.headersSent) {
+        res.status(500).json({ message: 'Failed to generate PDF: ' + err.message });
+      }
+    });
+    
     doc.on('end', () => {
-      const buffer = Buffer.concat(chunks);
-      res.setHeader('Content-Disposition', `attachment; filename="Dashboard_Report_${new Date().toISOString().split('T')[0]}.pdf"`);
-      res.setHeader('Content-Type', 'application/pdf');
-      res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
-      res.send(buffer);
+      if (hasError) return;
+      try {
+        const buffer = Buffer.concat(chunks);
+        res.setHeader('Content-Disposition', `attachment; filename="Dashboard_Report_${new Date().toISOString().split('T')[0]}.pdf"`);
+        res.setHeader('Content-Type', 'application/pdf');
+        res.setHeader('Access-Control-Expose-Headers', 'Content-Disposition');
+        res.send(buffer);
+      } catch (err) {
+        console.error('Error sending PDF:', err);
+        if (!res.headersSent) {
+          res.status(500).json({ message: 'Failed to send PDF: ' + err.message });
+        }
+      }
     });
 
     // Helper functions for PDF
@@ -1635,72 +1655,6 @@ router.get('/export/dashboard-pdf', auth, requirePermission('view_dashboard'), a
       
       y += 12;
     });
-
-    // Audit Logs Section
-    doc.addPage();
-    y = drawSectionHeader('Audit Logs', 50);
-    
-    if (!auditLogs || auditLogs.length === 0) {
-      doc.fillColor('#718096').fontSize(10).font('Helvetica');
-      doc.text('No audit logs available', 50, y);
-    } else {
-      // Table headers
-      doc.fillColor('#4a5568').fontSize(8).font('Helvetica-Bold');
-      doc.text('Action', 40, y, { width: 120 });
-      doc.text('Admin', 160, y, { width: 140 });
-      doc.text('Timestamp', 300, y, { width: 120 });
-      doc.text('IP Address', 420, y, { width: 120 });
-      y += 11;
-      doc.moveTo(40, y).lineTo(550, y).strokeColor('#cbd5e0').lineWidth(1).stroke();
-      y += 8;
-      
-      // Audit log rows
-      doc.font('Helvetica').fontSize(7);
-      auditLogs.forEach((log, idx) => {
-        y = checkPageBreak(14);
-        
-        // Alternating background
-        if (idx % 2 === 0) {
-          doc.rect(40, y - 2, 510, 12).fillColor('#f7fafc').fill();
-        }
-        
-        doc.fillColor('#2d3748');
-        
-        // Action
-        doc.text(String(log.action || '-').substring(0, 20), 40, y, { 
-          width: 120,
-          truncate: true
-        });
-        
-        // Admin name
-        doc.text(String(log.admin || '-').substring(0, 25), 160, y, { 
-          width: 140,
-          truncate: true
-        });
-        
-        // Timestamp
-        const timestamp = log.createdAt ? new Date(log.createdAt).toLocaleString() : log.timestamp || '-';
-        doc.text(timestamp.substring(0, 20), 300, y, { 
-          width: 120,
-          truncate: true
-        });
-        
-        // IP Address - show properly formatted
-        let ipAddress = log.ip || '-';
-        // Convert IPv6 localhost to readable format
-        if (ipAddress === '::1' || ipAddress === '::ffff:127.0.0.1') {
-          ipAddress = 'Localhost';
-        } else if (ipAddress === '127.0.0.1') {
-          ipAddress = 'Localhost';
-        }
-        doc.text(ipAddress.substring(0, 18), 420, y, { 
-          width: 120,
-          truncate: true
-        });
-        
-        y += 12;
-      });
-    }
 
     // Footer on last page
     doc.fontSize(8).fillColor('#718096').font('Helvetica');
