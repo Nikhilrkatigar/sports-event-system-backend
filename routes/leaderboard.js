@@ -557,6 +557,20 @@ router.patch('/admin/reset-hype/:id', auth, requirePermission('manage_leaderboar
   }
 });
 
+// Admin endpoint - delete ALL leaderboard entries (requires auth)
+router.delete('/admin/delete-all', auth, requirePermission('manage_leaderboard'), async (req, res) => {
+  try {
+    const result = await Leaderboard.deleteMany({});
+    res.json({ 
+      message: `All leaderboard entries deleted successfully! (${result.deletedCount} entries removed)`,
+      deletedCount: result.deletedCount
+    });
+  } catch (err) { 
+    console.error('Error deleting all entries:', err);
+    res.status(500).json({ message: `Error: ${err.message}` }); 
+  }
+});
+
 // Hype endpoint - increment hype count for a player (public)
 router.patch('/:id/hype', async (req, res) => {
   try {

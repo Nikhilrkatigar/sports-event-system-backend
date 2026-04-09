@@ -4,6 +4,7 @@ const eventSchema = new mongoose.Schema({
   title: { type: String, required: true },
   type: { type: String, enum: ['single', 'team'], required: true },
   eventCategory: { type: String, enum: ['general', 'track', 'field'], default: 'general' },
+  sportType: { type: String, enum: ['standard', 'cricket'], default: 'standard' },
   status: {
     type: String,
     enum: ['draft', 'coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed', 'archived'],
@@ -34,6 +35,8 @@ const eventSchema = new mongoose.Schema({
   lanesPerHeat: { type: Number, default: 8, min: 1, max: 20 },
   // Field event configuration (shot put, long jump, etc.)
   fieldAttempts: { type: Number, default: 3, min: 1, max: 10 },
+  // Cricket event configuration
+  cricketOvers: { type: Number, default: 20, min: 1, max: 100 },
   // Social features
   likes: { type: [String], default: [] },
   interested: { type: [String], default: [] },

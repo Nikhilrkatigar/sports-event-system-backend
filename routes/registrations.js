@@ -23,9 +23,26 @@ const storage = multer.diskStorage({
   },
   filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
 });
-const upload = multer({ storage });
+const ALLOWED_SCREENSHOT_MIME_TYPES = new Set(['image/png', 'image/jpeg']);
+const screenshotFileFilter = (req, file, cb) => {
+  if (!ALLOWED_SCREENSHOT_MIME_TYPES.has(file.mimetype)) {
+    cb(new Error('Only PNG, JPG, and JPEG files are allowed'));
+    return;
+  }
+  cb(null, true);
+};
+const upload = multer({ storage, fileFilter: screenshotFileFilter });
+const uploadPaymentScreenshot = (req, res, next) => {
+  upload.single('screenshot')(req, res, err => {
+    if (err) {
+      return res.status(400).json({ message: err.message });
+    }
+    next();
+  });
+};
 
 const ALLOWED_GENDERS = new Set(['male', 'female', 'unspecified']);
+const ALLOWED_CRICKET_ROLES = new Set(['batsman', 'bowler', 'all_rounder', 'wicket_keeper']);
 
 const normalizeGender = (value) => {
   const v = String(value || '').trim().toLowerCase();
@@ -113,6 +130,7 @@ const normalizePlayerInput = (player = {}, index = 0) => {
     phone: String(player.phone || '').trim(),
     department: String(player.department || '').trim(),
     gender,
+    role: String(player.role || '').trim(),
     isSubstitute: Boolean(player.isSubstitute),
     isTeamLeader: Boolean(player.isTeamLeader)
   };
@@ -196,6 +214,13 @@ router.post('/', async (req, res) => {
 
     const normalizedPlayers = players.map((player, index) => normalizePlayerInput(player, index));
     const mainPlayers = normalizedPlayers.filter((player) => !player.isSubstitute);
+
+    if (String(event.sportType || 'standard').toLowerCase() === 'cricket') {
+      const invalidRoleIndex = normalizedPlayers.findIndex((player) => !ALLOWED_CRICKET_ROLES.has(player.role));
+      if (invalidRoleIndex !== -1) {
+        return res.status(400).json({ message: `Select a cricket role for Player ${invalidRoleIndex + 1}` });
+      }
+    }
 
     if (mainPlayers.length === 0) {
       return res.status(400).json({ message: 'At least one main player is required' });
@@ -400,7 +425,8 @@ router.get('/', auth, requirePermission('view_registrations'), async (req, res) 
     if (gender) query['players.gender'] = gender;
 
     const applications = await Application.find(query)
-      .populate('eventId', 'title type status')
+      .populate('eventId', 'title type status registrationFee')
+      .populate('verifiedByAdmin', 'name')
       .sort({ createdAt: -1 });
 
     res.json(applications);
@@ -1014,7 +1040,9 @@ router.patch('/:id/verify-payment', auth, requirePermission('manage_registration
         verifiedByAdmin: req.admin.id
       },
       { new: true }
-    ).populate('eventId', 'title registrationFee');
+    )
+      .populate('eventId', 'title registrationFee')
+      .populate('verifiedByAdmin', 'name');
     
     if (!application) return res.status(404).json({ message: 'Registration not found' });
     res.json({ message: 'Payment verified successfully', data: application });
@@ -1034,7 +1062,9 @@ router.patch('/:id/unverify-payment', auth, requirePermission('manage_registrati
         verifiedByAdmin: null
       },
       { new: true }
-    ).populate('eventId', 'title registrationFee');
+    )
+      .populate('eventId', 'title registrationFee')
+      .populate('verifiedByAdmin', 'name');
     
     if (!application) return res.status(404).json({ message: 'Registration not found' });
     res.json({ message: 'Payment status reset', data: application });
@@ -1044,7 +1074,7 @@ router.patch('/:id/unverify-payment', auth, requirePermission('manage_registrati
 });
 
 // User: Upload payment screenshot proof
-router.patch('/:id/upload-payment-screenshot', auth, upload.single('screenshot'), async (req, res) => {
+router.patch('/:id/upload-payment-screenshot', uploadPaymentScreenshot, async (req, res) => {
   try {
     const application = await Application.findById(req.params.id).populate('eventId', 'title registrationFee paymentQRCode upiPaymentLink');
     if (!application) return res.status(404).json({ message: 'Registration not found' });

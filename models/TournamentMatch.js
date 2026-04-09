@@ -25,6 +25,12 @@ const tournamentFieldEntrySchema = new mongoose.Schema({
   rank: { type: Number, default: null }
 }, { _id: false });
 
+const cricketScoreSchema = new mongoose.Schema({
+  runs: { type: Number, default: null },
+  wickets: { type: Number, default: null },
+  overs: { type: String, default: '' }
+}, { _id: false });
+
 const tournamentMatchSchema = new mongoose.Schema({
   eventId: { type: mongoose.Schema.Types.ObjectId, ref: 'Event', required: true },
   tournamentId: { type: mongoose.Schema.Types.ObjectId, ref: 'Tournament', required: true },
@@ -40,6 +46,9 @@ const tournamentMatchSchema = new mongoose.Schema({
   participant2RegistrationNumber: { type: String, default: '' },
   score1: { type: Number, default: null },
   score2: { type: Number, default: null },
+  cricketScore1: { type: cricketScoreSchema, default: () => ({}) },
+  cricketScore2: { type: cricketScoreSchema, default: () => ({}) },
+  cricketResultText: { type: String, default: '' },
   winnerId: { type: mongoose.Schema.Types.ObjectId, ref: 'Application', default: null },
   winner: { type: String, default: null },
   winnerUucms: { type: String, default: '' },

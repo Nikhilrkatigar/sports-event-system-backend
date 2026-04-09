@@ -74,10 +74,34 @@ const getEventCategory = (event) => {
 };
 
 const getAllowedFormatsForEvent = (event) => {
+  if (event?.sportType === 'cricket') return ['single_elimination', 'round_robin'];
   const category = getEventCategory(event);
   if (category === 'track') return ['track_heats'];
   if (category === 'field') return ['field_flight'];
   return ['single_elimination', 'round_robin'];
+};
+
+const isCricketEvent = (event) => String(event?.sportType || 'standard').toLowerCase() === 'cricket';
+
+const normalizeCricketScore = (input = {}) => {
+  const hasAnyValue = ['runs', 'wickets', 'overs'].some((key) => input?.[key] !== '' && input?.[key] != null);
+  if (!hasAnyValue) return { runs: null, wickets: null, overs: '' };
+
+  const runsValue = input?.runs === '' || input?.runs == null ? null : Number(input.runs);
+  const wicketsValue = input?.wickets === '' || input?.wickets == null ? null : Number(input.wickets);
+  const oversValue = typeof input?.overs === 'string' ? input.overs.trim() : String(input?.overs || '').trim();
+
+  return {
+    runs: Number.isFinite(runsValue) ? Math.max(0, runsValue) : null,
+    wickets: Number.isFinite(wicketsValue) ? Math.max(0, Math.min(10, wicketsValue)) : null,
+    overs: oversValue
+  };
+};
+
+const buildCricketResultText = (winner, isTie) => {
+  if (isTie) return 'Match tied';
+  if (!winner) return '';
+  return `${winner} won the match`;
 };
 
 const getApplicationDepartment = (application) => {
@@ -333,7 +357,7 @@ const enrichFieldEntriesWithUucms = async (matches) => {
 // Public: Get all tournaments
 router.get('/', async (req, res) => {
   try {
-    const tournaments = await Tournament.find().populate('eventId', 'title type image date status lanesPerHeat eventCategory');
+    const tournaments = await Tournament.find().populate('eventId', 'title type image date status lanesPerHeat eventCategory sportType cricketOvers');
     res.json(tournaments.map(hydrateTournament));
   } catch (err) {
     res.status(500).json({ message: err.message });
@@ -348,7 +372,7 @@ router.get('/event/:eventId', async (req, res) => {
     if (genderFilter && ['male', 'female', 'all'].includes(genderFilter)) {
       query.genderFilter = genderFilter;
     }
-    const tournaments = await Tournament.find(query).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
+    const tournaments = await Tournament.find(query).populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts sportType cricketOvers');
     if (tournaments.length === 0) return res.status(404).json({ message: 'No tournament found for this event' });
 
     // If a specific genderFilter was requested, return a single tournament
@@ -480,7 +504,7 @@ router.get('/event/:eventId/print', async (req, res) => {
 
     const tournament = await Tournament.findOne(query)
       .sort({ createdAt: 1 })
-      .populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts');
+      .populate('eventId', 'title type image date status lanesPerHeat eventCategory scoreOrder fieldAttempts sportType cricketOvers');
     if (!tournament) return res.status(404).json({ message: 'No tournament found for this event' });
     
     let matches = await TournamentMatch.find({ tournamentId: tournament._id }).sort({ round: 1, matchNumber: 1 });
@@ -543,7 +567,7 @@ router.get('/live', async (req, res) => {
       .populate({
         path: 'tournamentId',
         select: 'format status',
-        populate: { path: 'eventId', select: 'title type' }
+        populate: { path: 'eventId', select: 'title type sportType cricketOvers' }
       })
       .sort({ updatedAt: -1 })
       .limit(10);
@@ -572,6 +596,10 @@ router.post('/generate', auth, requirePermission('manage_tournaments'), async (r
 
     const event = await Event.findById(eventId);
     if (!event) return res.status(404).json({ message: 'Event not found' });
+    const allowedFormats = getAllowedFormatsForEvent(event);
+    if (!allowedFormats.includes(format)) {
+      return res.status(400).json({ message: `Format ${format} is not allowed for this event` });
+    }
 
     const normalizedGender = genderFilter && ['male', 'female'].includes(genderFilter) ? genderFilter : 'all';
 
@@ -664,7 +692,7 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
 
     const tournament = await Tournament.findById(match.tournamentId);
     if (!tournament) return res.status(404).json({ message: 'Tournament not found' });
-    const event = await Event.findById(match.eventId).select('scoreOrder lanesPerHeat');
+    const event = await Event.findById(match.eventId).select('scoreOrder lanesPerHeat sportType cricketOvers');
     let responseMessage = null;
 
     if (tournament.format === 'track_heats') {
@@ -798,6 +826,68 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
       match.status = 'completed';
       match.updatedAt = new Date();
       await match.save();
+    } else if (isCricketEvent(event)) {
+      const matchStatus = ['pending', 'in_progress', 'completed'].includes(String(req.body.status || ''))
+        ? String(req.body.status)
+        : 'completed';
+      const cricketScore1 = normalizeCricketScore(req.body.cricketScore1);
+      const cricketScore2 = normalizeCricketScore(req.body.cricketScore2);
+      const winnerSlot = Number(req.body.winnerSlot || 0);
+      const hasScore1 = cricketScore1.runs != null;
+      const hasScore2 = cricketScore2.runs != null;
+
+      if (!match.participant1 || !match.participant2) {
+        return res.status(400).json({ message: 'Both participants must be set before entering cricket scores' });
+      }
+
+      if (matchStatus === 'completed' && (!hasScore1 || !hasScore2)) {
+        return res.status(400).json({ message: 'Enter both team scores before completing the match' });
+      }
+
+      match.cricketScore1 = cricketScore1;
+      match.cricketScore2 = cricketScore2;
+      match.score1 = hasScore1 ? cricketScore1.runs : null;
+      match.score2 = hasScore2 ? cricketScore2.runs : null;
+      match.updatedAt = new Date();
+
+      const isTie = hasScore1 && hasScore2 && cricketScore1.runs === cricketScore2.runs;
+      let resolvedWinnerSlot = 0;
+
+      if (winnerSlot === 1 || winnerSlot === 2) {
+        resolvedWinnerSlot = winnerSlot;
+      } else if (hasScore1 && hasScore2 && cricketScore1.runs > cricketScore2.runs) {
+        resolvedWinnerSlot = 1;
+      } else if (hasScore1 && hasScore2 && cricketScore2.runs > cricketScore1.runs) {
+        resolvedWinnerSlot = 2;
+      }
+
+      if (matchStatus === 'completed' && tournament.format === 'single_elimination' && isTie && !resolvedWinnerSlot) {
+        return res.status(400).json({ message: 'Select a winner for tied knockout cricket matches' });
+      }
+
+      if (resolvedWinnerSlot === 1) {
+        match.winnerId = match.participant1Id;
+        match.winner = match.participant1;
+        match.winnerUucms = match.participant1Uucms || '';
+      } else if (resolvedWinnerSlot === 2) {
+        match.winnerId = match.participant2Id;
+        match.winner = match.participant2;
+        match.winnerUucms = match.participant2Uucms || '';
+      } else {
+        match.winnerId = null;
+        match.winner = null;
+        match.winnerUucms = '';
+      }
+
+      match.cricketResultText = typeof req.body.cricketResultText === 'string' && req.body.cricketResultText.trim()
+        ? req.body.cricketResultText.trim()
+        : buildCricketResultText(match.winner, matchStatus === 'completed' && isTie && !resolvedWinnerSlot);
+      match.status = matchStatus;
+      await match.save();
+
+      if (match.status === 'completed' && tournament.format === 'single_elimination') {
+        await advanceWinner(match);
+      }
     } else {
       const { score1, score2 } = req.body;
       if (score1 == null || score2 == null) {
@@ -843,8 +933,10 @@ router.put('/match/:matchId', auth, requirePermission('manage_tournaments'), asy
     });
     if (pendingMatches === 0) {
       tournament.status = 'completed';
-      await tournament.save();
+    } else {
+      tournament.status = 'in_progress';
     }
+    await tournament.save();
 
     const allMatches = await TournamentMatch.find({ tournamentId: match.tournamentId }).sort({ round: 1, matchNumber: 1 });
     

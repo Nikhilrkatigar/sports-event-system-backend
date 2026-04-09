@@ -20,8 +20,27 @@ const app = express();
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
-    origin: process.env.CORS_ORIGINS ? process.env.CORS_ORIGINS.split(',') : ['http://localhost:3000'],
-    methods: ['GET', 'POST']
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        'http://localhost:3000',
+        'http://localhost:3001',
+        'http://localhost:8000',
+        process.env.REACT_APP_FRONTEND_URL || '',
+        'https://sports-event-system-frontend.vercel.app'
+      ].filter(Boolean);
+      
+      const patterns = [
+        /^https:\/\/sports-event-system-frontend.*\.vercel\.app$/
+      ];
+      
+      if (!origin || allowedOrigins.includes(origin) || patterns.some(p => p.test(origin))) {
+        callback(null, true);
+      } else {
+        callback(new Error('CORS not allowed'));
+      }
+    },
+    methods: ['GET', 'POST'],
+    credentials: true
   }
 });
 
@@ -71,6 +90,7 @@ app.use('/api/users', require('./routes/users'));
 app.use('/api/tournaments', require('./routes/tournaments'));
 app.use('/api/timeline', require('./routes/timeline'));
 app.use('/api/messages', require('./routes/messages'));
+app.use('/api/cricket', require('./routes/cricketRoutes'));
 app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
 app.get('/api/debug/models', (req, res) => {
   const { TimelineItem } = require('./models');

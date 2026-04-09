@@ -6,6 +6,7 @@ const playerSchema = new mongoose.Schema({
   phone: String,
   department: String,
   gender: { type: String, enum: ['male', 'female', 'unspecified'], default: 'unspecified' },
+  role: { type: String, enum: ['', 'batsman', 'bowler', 'all_rounder', 'wicket_keeper'], default: '' },
   qrCode: String,
   checkInStatus: { type: Boolean, default: false },
   isSubstitute: { type: Boolean, default: false },

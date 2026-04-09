@@ -1,6 +1,7 @@
 const EVENT_STATUSES = ['draft', 'coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed', 'archived'];
 const PUBLIC_EVENT_STATUSES = ['coming_soon', 'published', 'open', 'full', 'closed', 'live', 'completed'];
 const EVENT_CATEGORIES = ['general', 'track', 'field'];
+const SPORT_TYPES = ['standard', 'cricket'];
 
 const normalizeDate = (value) => {
   if (!value) return null;
@@ -65,6 +66,11 @@ const getNormalizedEventPayload = (input = {}) => {
     if (EVENT_CATEGORIES.includes(eventCategory)) payload.eventCategory = eventCategory;
     else delete payload.eventCategory;
   }
+  if (payload.sportType != null) {
+    const sportType = String(payload.sportType || '').trim().toLowerCase();
+    if (SPORT_TYPES.includes(sportType)) payload.sportType = sportType;
+    else delete payload.sportType;
+  }
 
   if (payload.maxParticipants === '' || payload.maxParticipants == null) delete payload.maxParticipants;
   else payload.maxParticipants = Number(payload.maxParticipants);
@@ -74,6 +80,9 @@ const getNormalizedEventPayload = (input = {}) => {
 
   if (payload.fieldAttempts === '' || payload.fieldAttempts == null) delete payload.fieldAttempts;
   else payload.fieldAttempts = Math.min(10, Math.max(1, Number(payload.fieldAttempts)));
+
+  if (payload.cricketOvers === '' || payload.cricketOvers == null) delete payload.cricketOvers;
+  else payload.cricketOvers = Math.min(100, Math.max(1, Number(payload.cricketOvers)));
 
   if (payload.registrationDeadline === '') delete payload.registrationDeadline;
   if (payload.date === '') delete payload.date;
@@ -98,6 +107,11 @@ const getNormalizedEventPayload = (input = {}) => {
     payload.registrationOpen = payload.status === 'open';
   }
 
+  if (payload.sportType === 'cricket') {
+    payload.type = 'team';
+    payload.eventCategory = 'general';
+  }
+
   return payload;
 };
 
@@ -120,6 +134,7 @@ const syncEventRegistrationStatus = async (event, counts = {}) => {
 module.exports = {
   EVENT_STATUSES,
   EVENT_CATEGORIES,
+  SPORT_TYPES,
   PUBLIC_EVENT_STATUSES,
   getMainPlayerCount,
   getEventCapacity,
