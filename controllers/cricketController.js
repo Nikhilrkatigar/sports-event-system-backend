@@ -1139,7 +1139,7 @@ exports.createFromTournament = async (req, res) => {
       return res.status(400).json({ error: 'Tournament ID is required' });
     }
 
-    const { Tournament, TournamentMatch, Application, Event } = require('../models');
+    const { Tournament, TournamentMatch, Application, Event, CricketMatch } = require('../models');
 
     const tournament = await Tournament.findById(tournamentId).populate('eventId');
     if (!tournament) {
@@ -1198,9 +1198,9 @@ exports.createFromTournament = async (req, res) => {
           }
 
           // Use actual players from application
-          const mainPlayers = app.players.filter(p => !p.isSubstitute).slice(0, 11);
+          const mainPlayers = app.players.filter(p => !p.isSubstitute && p.name).slice(0, 11);
           return mainPlayers.map((p, idx) => ({
-            name: p.name,
+            name: p.name || `Player ${idx + 1}`,
             uucms: p.uucms || '',
             department: p.department || '',
             role: p.role || 'batsman',
@@ -1246,7 +1246,9 @@ exports.createFromTournament = async (req, res) => {
 
         console.log(`✅ Created cricket match from tournament: ${tMatch.participant1} vs ${tMatch.participant2}`);
       } catch (matchError) {
-        console.error(`❌ Error creating cricket match from tournament match ${tMatch._id}:`, matchError);
+        console.error(`❌ Error creating cricket match from tournament match ${tMatch._id}:`, matchError.message);
+        console.error(`   Details: Participant1=${tMatch.participant1}, Participant2=${tMatch.participant2}`);
+        console.error(`   Stack: ${matchError.stack}`);
       }
     }
 
@@ -1261,6 +1263,10 @@ exports.createFromTournament = async (req, res) => {
     });
   } catch (err) {
     console.error('createFromTournament error:', err);
-    res.status(500).json({ error: err.message });
+    console.error('Error stack:', err.stack);
+    res.status(500).json({ 
+      error: 'Failed to generate cricket matches: ' + err.message,
+      details: err.stack 
+    });
   }
 };
