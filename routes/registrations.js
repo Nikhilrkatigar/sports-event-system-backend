@@ -61,7 +61,34 @@ const formatGender = (value) => {
 };
 
 const normalizeUucms = (value) => String(value || '').trim().toUpperCase();
+const normalizeTeamName = (value) => String(value || '').trim().replace(/\s+/g, ' ').toUpperCase();
+const normalizeTeamNameKey = (value) => normalizeTeamName(value).replace(/[\s_]+/g, '');
 const escapeRegex = (value) => String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+
+const buildLooseTeamNameRegex = (value) => {
+  const canonical = normalizeTeamNameKey(value);
+  if (!canonical) return null;
+  return new RegExp(`^${canonical.split('').map(escapeRegex).join('[\\\\s_]*')}$`, 'i');
+};
+
+const findExistingTeamRegistrationByName = (teamName, excludeId = null) => {
+  const normalizedTeamName = normalizeTeamName(teamName);
+  const normalizedTeamNameKey = normalizeTeamNameKey(teamName);
+  const looseRegex = buildLooseTeamNameRegex(teamName);
+  const query = {
+    teamId: { $ne: null },
+    $or: [
+      { teamNameNormalized: normalizedTeamNameKey },
+      { teamName: looseRegex }
+    ]
+  };
+
+  if (excludeId) {
+    query._id = { $ne: excludeId };
+  }
+
+  return Application.findOne(query).select('_id teamName teamId');
+};
 
 const buildSearchQuery = (search) => {
   const trimmed = String(search || '').trim();
@@ -340,8 +367,17 @@ router.post('/', async (req, res) => {
       });
     }
 
+    const finalTeamName = event.type === 'team' ? normalizeTeamName(teamName) : null;
+    if (finalTeamName) {
+      const existingTeam = await findExistingTeamRegistrationByName(finalTeamName);
+      if (existingTeam) {
+        return res.status(400).json({
+          message: `Team name ${finalTeamName} is already taken`
+        });
+      }
+    }
+
     const teamId = event.type === 'team' ? generateTeamId(event.title, counts.teamCount) : null;
-    const finalTeamName = event.type === 'team' ? String(teamName).trim() : null;
     const playersWithStatus = normalizedPlayers.map((player) => ({
       ...player,
       checkInStatus: false
@@ -406,6 +442,32 @@ router.get('/player/:uucms', async (req, res) => {
     }).populate('eventId', 'title type status date');
 
     res.json(applications);
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
+// Public: Check team name availability
+router.get('/team-name-availability', async (req, res) => {
+  try {
+    const normalizedTeamName = normalizeTeamName(req.query.teamName);
+    const excludeId = String(req.query.excludeId || '').trim();
+
+    if (!normalizedTeamName) {
+      return res.status(400).json({ message: 'Team name is required' });
+    }
+
+    const existingTeam = await findExistingTeamRegistrationByName(normalizedTeamName, excludeId || null);
+    res.json({
+      normalizedTeamName,
+      normalizedTeamNameKey: normalizeTeamNameKey(normalizedTeamName),
+      available: !existingTeam,
+      existingTeam: existingTeam ? {
+        id: existingTeam._id,
+        teamName: existingTeam.teamName,
+        teamId: existingTeam.teamId
+      } : null
+    });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -788,8 +850,14 @@ router.patch('/:id', auth, requirePermission('manage_registrations'), async (req
     if (!application.teamId) return res.status(400).json({ message: 'Only team registrations can have a team name' });
     if (!teamName || !String(teamName).trim()) return res.status(400).json({ message: 'Team name is required' });
 
+    const normalizedTeamName = normalizeTeamName(teamName);
+    const existingTeam = await findExistingTeamRegistrationByName(normalizedTeamName, application._id);
+    if (existingTeam) {
+      return res.status(400).json({ message: `Team name ${normalizedTeamName} is already taken` });
+    }
+
     const previousName = application.teamName;
-    application.teamName = String(teamName).trim();
+    application.teamName = normalizedTeamName;
     await application.save();
     await syncTournamentDisplayName(application, previousName, application.teamName);
 

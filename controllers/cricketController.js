@@ -12,6 +12,14 @@ function ballsToOvers(balls) {
   return `${overs}.${remainder}`;
 }
 
+const WIDE_WICKET_TYPES = new Set(['run_out', 'stumped', 'hit_wicket', 'obstructing_field']);
+const FREE_HIT_WICKET_TYPES = new Set(['run_out', 'obstructing_field']);
+
+function getMaxBowlerOvers(match) {
+  const oversPerSide = Number(match?.oversPerSide || 20);
+  return Math.max(1, Math.ceil(oversPerSide / 5));
+}
+
 /** Compute strike rate */
 function strikeRate(runs, balls) {
   if (!balls || balls === 0) return 0;
@@ -30,7 +38,7 @@ function countsAsTeamWicket(wicketType) {
 }
 
 function countsAsBowlerWicket(wicketType) {
-  return !['run_out', 'retired_hurt', 'retired_out'].includes(wicketType);
+  return !['run_out', 'retired_hurt', 'retired_out', 'obstructing_field'].includes(wicketType);
 }
 
 function dismissalTextForWicket(wicketType, bowlerName, wicketFielder) {
@@ -51,6 +59,8 @@ function dismissalTextForWicket(wicketType, bowlerName, wicketFielder) {
       return `lbw b ${bowlerName}`;
     case 'hit_wicket':
       return `hit wicket b ${bowlerName}`;
+    case 'obstructing_field':
+      return 'obstructing the field';
     case 'retired_hurt':
       return 'retired hurt';
     case 'retired_out':
@@ -196,6 +206,8 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
       })]
     : [];
   innings.isCompleted = false;
+  match.lastCompletedOverBowlerId = '';
+  match.isNextBallFreeHit = false;
 
   match.currentStrikerId = openingBatsmen[0]?.playerId || '';
   match.currentNonStrikerId = openingBatsmen[1]?.playerId || '';
@@ -208,13 +220,14 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
     const totalRunsThisBall = Number(delivery.totalRuns || 0);
     const batterRuns = Number(delivery.runsScored || 0);
     const isLegalDelivery = !delivery.isWide && !delivery.isNoBall;
+    const isPenaltyDelivery = Boolean(delivery.isPenalty) || Number(delivery.penaltyRuns || 0) > 0;
 
     if (strikerStat?.playerId) match.currentStrikerId = strikerStat.playerId;
     if (nonStrikerStat?.playerId) match.currentNonStrikerId = nonStrikerStat.playerId;
     if (bowlerStat?.playerId) match.currentBowlerId = bowlerStat.playerId;
 
     if (strikerStat) {
-      if (!delivery.isWide && !delivery.isBye && !delivery.isLegBye) {
+      if (!delivery.isWide && !delivery.isBye && !delivery.isLegBye && !isPenaltyDelivery) {
         strikerStat.runs += batterRuns;
         if (delivery.isFour) strikerStat.fours += 1;
         if (delivery.isSix) strikerStat.sixes += 1;
@@ -230,13 +243,22 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
       }
       if (delivery.isWide) bowlerStat.wides += 1;
       if (delivery.isNoBall) bowlerStat.noBalls += 1;
-      bowlerStat.runsConceded += totalRunsThisBall;
+      if (!delivery.isBye && !delivery.isLegBye && !isPenaltyDelivery) {
+        bowlerStat.runsConceded += totalRunsThisBall;
+      }
     }
 
     if (delivery.isWide) innings.extras.wides += totalRunsThisBall || 1;
     else if (delivery.isNoBall) innings.extras.noBalls += 1;
     else if (delivery.isBye) innings.extras.byes += totalRunsThisBall;
     else if (delivery.isLegBye) innings.extras.legByes += totalRunsThisBall;
+    else if (isPenaltyDelivery) innings.extras.penalties += totalRunsThisBall;
+
+    if (delivery.isNoBall) {
+      match.isNextBallFreeHit = true;
+    } else if (isLegalDelivery && !delivery.isWide) {
+      match.isNextBallFreeHit = false;
+    }
 
     innings.totalRuns += totalRunsThisBall;
     innings.currentOverRuns += totalRunsThisBall;
@@ -246,6 +268,12 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
       innings.currentOverBalls += 1;
     }
     innings.totalOvers = ballsToOvers(innings.totalBalls);
+
+    if (isNoBall) {
+      match.isNextBallFreeHit = true;
+    } else if (isLegalDelivery && !isWide) {
+      match.isNextBallFreeHit = false;
+    }
 
     const currentPartnership = innings.partnerships[innings.partnerships.length - 1];
     if (currentPartnership) {
@@ -321,6 +349,8 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
       }
       innings.currentOverBalls = 0;
       innings.currentOverRuns = 0;
+      match.lastCompletedOverBowlerId = bowlerStat?.playerId || match.lastCompletedOverBowlerId;
+      match.currentBowlerId = '';
       swapCurrentBatsmen(match);
     }
   }
@@ -332,10 +362,14 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
 
 /** Generate a short commentary string for a delivery */
 function generateCommentary(data) {
-  const { batsmanName, bowlerName, runsScored, isWide, isNoBall, isBye, isLegBye, isOverthrow, isFour, isSix, isWicket, wicketType, wicketBatsman, overthrowBaseRuns, overthrowRuns } = data;
+  const { batsmanName, bowlerName, runsScored, isWide, isNoBall, isBye, isLegBye, isOverthrow, isPenalty, penaltyRuns, isFour, isSix, isWicket, wicketType, wicketBatsman, overthrowBaseRuns, overthrowRuns } = data;
   if (isWicket) {
     const howOut = wicketType.replace('_', ' ').toUpperCase();
     return `OUT! ${wicketBatsman || batsmanName} is ${howOut}! ${bowlerName} strikes.`;
+  }
+  if (isPenalty) {
+    const awardedPenaltyRuns = penaltyRuns || runsScored || 0;
+    return `Penalty runs awarded: ${awardedPenaltyRuns} run${awardedPenaltyRuns !== 1 ? 's' : ''}.`;
   }
   if (isOverthrow) {
     if (overthrowRuns > 0) {
@@ -765,6 +799,10 @@ exports.startInnings = async (req, res) => {
       return res.status(400).json({ error: 'Invalid player indices' });
     }
 
+    if (String(strikerId) === String(nonStrikerId)) {
+      return res.status(400).json({ error: 'Striker and non-striker must be different players' });
+    }
+
     // Create innings
     const inningsData = {
       inningNumber,
@@ -870,6 +908,8 @@ exports.recordBall = async (req, res) => {
       isOverthrow = false,
       overthrowBaseRuns = 0,
       overthrowRuns = 0,
+      isPenalty = false,
+      penaltyRuns = 0,
       isWicket = false,
       wicketType = '',
       wicketBatsman = '',
@@ -877,29 +917,46 @@ exports.recordBall = async (req, res) => {
       newBatsmanId = ''
     } = req.body;
 
+    const parsedPenaltyRuns = Math.max(0, Number(penaltyRuns || 0));
+    const hasPenaltyRuns = Boolean(isPenalty) || parsedPenaltyRuns > 0;
+
     const battingTeamData = match[innings.battingTeam];
     const bowlingTeamData = match[innings.bowlingTeam];
 
+    if (match.isNextBallFreeHit && isWicket && !FREE_HIT_WICKET_TYPES.has(wicketType)) {
+      return res.status(400).json({ error: 'Only run out or obstructing the field is allowed on a free hit' });
+    }
+
+    if (isWide && isWicket && !WIDE_WICKET_TYPES.has(wicketType)) {
+      return res.status(400).json({ error: 'Invalid wicket type on a wide ball' });
+    }
+
+    if (hasPenaltyRuns && (isWide || isNoBall || isBye || isLegBye || isOverthrow || isWicket)) {
+      return res.status(400).json({ error: 'Penalty runs must be recorded on their own' });
+    }
+
     // Current players
     const strikerStat = innings.batsmenStats.find(b => b.playerId === match.currentStrikerId && !b.isOut);
-    const bowlerStat = innings.bowlerStats.find(b => b.playerId === match.currentBowlerId);
+    const bowlerStat = match.currentBowlerId
+      ? innings.bowlerStats.find(b => b.playerId === match.currentBowlerId)
+      : null;
     
     // Allow recording all-out wickets without striker validation
     const isAllOutWicket = isWicket && !newBatsmanId;
     
-    if (!isAllOutWicket && (!strikerStat || !bowlerStat)) {
+    if (!hasPenaltyRuns && !isAllOutWicket && (!strikerStat || !bowlerStat)) {
       console.warn(`❌ Striker: ${strikerStat ? 'Found' : 'NOT FOUND'}, Bowler: ${bowlerStat ? 'Found' : 'NOT FOUND'}`);
       return res.status(400).json({ error: 'Current striker or bowler not found' });
     }
     
     // For all-out wickets, ensure we have at least the bowler
-    if (isAllOutWicket && !bowlerStat) {
+    if (!hasPenaltyRuns && isAllOutWicket && !bowlerStat) {
       console.warn('❌ All-out wicket but bowler not found');
       return res.status(400).json({ error: 'Bowler not found for all-out wicket' });
     }
 
     // For all-out situations, strikerStat is null - that's okay
-    if (!strikerStat && !isAllOutWicket) {
+    if (!hasPenaltyRuns && !strikerStat && !isAllOutWicket) {
       console.warn('❌ Striker not found and not an all-out wicket');
       return res.status(400).json({ error: 'Current striker not found' });
     }
@@ -914,11 +971,20 @@ exports.recordBall = async (req, res) => {
     let isLegalDelivery = true;
     let computedOverthrowBaseRuns = 0;
     let computedOverthrowRuns = 0;
+    let isPenaltyDelivery = false;
     const isFour = runsScored === 4 && !isBye && !isLegBye;
     const isSix = runsScored === 6 && !isBye && !isLegBye;
 
+    if (hasPenaltyRuns) {
+      isPenaltyDelivery = true;
+      totalRunsThisBall = parsedPenaltyRuns || 5;
+      extraRuns = totalRunsThisBall;
+      isLegalDelivery = false;
+      innings.extras.penalties += totalRunsThisBall;
+    }
+
     // For all-out wickets, skip normal ball processing - just record the dismissal
-    if (!isAllOutWicket) {
+    if (!isPenaltyDelivery && !isAllOutWicket) {
       if (isWide) {
         extraRuns = 1 + runsScored;
         totalRunsThisBall = extraRuns;
@@ -1089,7 +1155,7 @@ exports.recordBall = async (req, res) => {
     // Skip rotation when a wicket falls and a new batsman has been set — the new
     // batsman already inherits the correct end; rotating would put them at the wrong end.
     const wicketWithNewBatsman = isWicket && newBatsmanId;
-    if (!isWide && runsScored % 2 === 1 && !wicketWithNewBatsman) {
+    if (!isPenaltyDelivery && !isWide && runsScored % 2 === 1 && !wicketWithNewBatsman) {
       swapCurrentBatsmen(match);
     }
 
@@ -1099,8 +1165,10 @@ exports.recordBall = async (req, res) => {
     });
 
     // Update bowler stats
-    bowlerStat.oversBowled = parseFloat(ballsToOvers(bowlerStat.ballsBowled));
-    bowlerStat.economy = economy(bowlerStat.runsConceded, bowlerStat.ballsBowled);
+    if (bowlerStat) {
+      bowlerStat.oversBowled = parseFloat(ballsToOvers(bowlerStat.ballsBowled));
+      bowlerStat.economy = economy(bowlerStat.runsConceded, bowlerStat.ballsBowled);
+    }
 
     // Check over completion (6 legal deliveries in this over)
     let overCompleted = false;
@@ -1116,6 +1184,8 @@ exports.recordBall = async (req, res) => {
       }
       innings.currentOverBalls = 0;
       innings.currentOverRuns = 0;
+      match.lastCompletedOverBowlerId = match.currentBowlerId || match.lastCompletedOverBowlerId;
+      match.currentBowlerId = '';
 
       // Rotate strike at end of over
       swapCurrentBatsmen(match);
@@ -1180,13 +1250,15 @@ exports.recordBall = async (req, res) => {
       overNumber: currentOver,
       ballNumber: isLegalDelivery ? (overCompleted ? 6 : currentBall) : 0,
       batsmanName: strikerName,
-      bowlerName: bowlerStat.playerName,
+      bowlerName: bowlerStat?.playerName || '',
       nonStrikerName,
       runsScored: isOverthrow ? totalRunsThisBall : runsScored,
       extraRuns,
       totalRuns: totalRunsThisBall,
       overthrowBaseRuns: isOverthrow ? computedOverthrowBaseRuns : 0,
       overthrowRuns: isOverthrow ? computedOverthrowRuns : 0,
+      isPenalty: isPenaltyDelivery,
+      penaltyRuns: isPenaltyDelivery ? totalRunsThisBall : 0,
       isWide,
       isNoBall,
       isBye,
@@ -1206,9 +1278,11 @@ exports.recordBall = async (req, res) => {
       teamWickets: innings.totalWickets,
       oversSoFar: innings.totalOvers,
       commentary: generateCommentary({
-        batsmanName: strikerName, bowlerName: bowlerStat.playerName,
+        batsmanName: strikerName, bowlerName: bowlerStat?.playerName || '',
         runsScored: isOverthrow ? totalRunsThisBall : runsScored,
         isWide, isNoBall, isBye, isLegBye, isOverthrow, isFour, isSix,
+        isPenalty: isPenaltyDelivery,
+        penaltyRuns: isPenaltyDelivery ? totalRunsThisBall : 0,
         isWicket, wicketType, wicketBatsman, extraRuns,
         overthrowBaseRuns: isOverthrow ? computedOverthrowBaseRuns : 0,
         overthrowRuns: isOverthrow ? computedOverthrowRuns : 0
@@ -1303,6 +1377,10 @@ exports.endOver = async (req, res) => {
     const innings = match.innings.find(i => i.inningNumber === match.currentInning);
     if (!innings) return res.status(400).json({ error: 'No active innings' });
 
+    if (String(newBowlerId) === String(match.lastCompletedOverBowlerId)) {
+      return res.status(400).json({ error: 'The same bowler cannot bowl consecutive overs' });
+    }
+
     const bowlingTeamData = match[innings.bowlingTeam];
     const bowlerPlayer = bowlingTeamData.players[parseInt(newBowlerId)];
     if (!bowlerPlayer) return res.status(400).json({ error: 'Invalid bowler index' });
@@ -1318,6 +1396,11 @@ exports.endOver = async (req, res) => {
         economy: 0, bowlingOrder: innings.bowlerStats.length + 1
       };
       innings.bowlerStats.push(bowlerStat);
+    }
+
+    const maxOversPerBowler = getMaxBowlerOvers(match);
+    if (bowlerStat.ballsBowled >= maxOversPerBowler * 6) {
+      return res.status(400).json({ error: `This bowler has already bowled the maximum of ${maxOversPerBowler} over${maxOversPerBowler !== 1 ? 's' : ''}` });
     }
 
     match.currentBowlerId = newBowlerId;

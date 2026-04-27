@@ -132,6 +132,8 @@ const cricketMatchSchema = new mongoose.Schema({
   currentStrikerId: { type: String, default: '' },
   currentNonStrikerId: { type: String, default: '' },
   currentBowlerId: { type: String, default: '' },
+  lastCompletedOverBowlerId: { type: String, default: '' },  // bowler of the last completed over (for consecutive-over rule)
+  isNextBallFreeHit: { type: Boolean, default: false },       // ICC Free Hit after no-ball
 
   // Innings data
   innings: [inningsSchema],

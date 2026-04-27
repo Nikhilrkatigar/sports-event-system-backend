@@ -17,6 +17,8 @@ const cricketDeliverySchema = new mongoose.Schema({
   totalRuns: { type: Number, default: 0 },             // total runs added for this delivery
   overthrowBaseRuns: { type: Number, default: 0 },     // runs completed before overthrow
   overthrowRuns: { type: Number, default: 0 },         // runs scored due to overthrow
+  isPenalty: { type: Boolean, default: false },
+  penaltyRuns: { type: Number, default: 0 },
 
   // Extras flags
   isWide: { type: Boolean, default: false },
@@ -33,7 +35,7 @@ const cricketDeliverySchema = new mongoose.Schema({
   isWicket: { type: Boolean, default: false },
   wicketType: {
     type: String,
-    enum: ['', 'bowled', 'caught', 'run_out', 'stumped', 'lbw', 'hit_wicket', 'retired_hurt', 'retired_out'],
+    enum: ['', 'bowled', 'caught', 'run_out', 'stumped', 'lbw', 'hit_wicket', 'obstructing_field', 'retired_hurt', 'retired_out'],
     default: ''
   },
   wicketBatsman: { type: String, default: '' },        // who got out
