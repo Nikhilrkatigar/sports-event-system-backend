@@ -4,3 +4,4 @@ uploads/
 build/
 dist/
 .DS_Store
+.env.example

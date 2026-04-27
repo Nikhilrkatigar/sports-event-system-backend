@@ -1,4 +1,5 @@
-const { CricketMatch, CricketDelivery } = require('../models');
+const { CricketMatch, CricketDelivery, Tournament, TournamentMatch } = require('../models');
+const { emitTournamentMatchUpdate } = require('../utils/socket');
 
 // ============================================================
 // Helper utilities
@@ -39,6 +40,142 @@ function generateCommentary(data) {
   if (isLegBye) return `Leg bye off ${bowlerName}. ${data.extraRuns || 1} run(s).`;
   if (runsScored === 0) return `Dot ball. Good delivery by ${bowlerName} to ${batsmanName}.`;
   return `${runsScored} run(s) scored by ${batsmanName} off ${bowlerName}.`;
+}
+
+/**
+ * Advance a completed single-elimination tournament winner to the next round.
+ * Mirrors tournament route progression so cricket scoring can keep brackets in sync.
+ */
+async function advanceTournamentWinner(tournamentMatch) {
+  if (!tournamentMatch?.winner) return;
+
+  const tournament = await Tournament.findById(tournamentMatch.tournamentId);
+  if (!tournament || tournament.format !== 'single_elimination') return;
+
+  const nextRound = tournamentMatch.round + 1;
+  const nextMatchNumber = Math.ceil(tournamentMatch.matchNumber / 2);
+  const nextMatch = await TournamentMatch.findOne({
+    tournamentId: tournamentMatch.tournamentId,
+    round: nextRound,
+    matchNumber: nextMatchNumber
+  });
+
+  if (!nextMatch) return;
+
+  if (tournamentMatch.matchNumber % 2 === 1) {
+    nextMatch.participant1Id = tournamentMatch.winnerId;
+    nextMatch.participant1 = tournamentMatch.winner;
+    nextMatch.participant1Uucms = tournamentMatch.winnerUucms || '';
+  } else {
+    nextMatch.participant2Id = tournamentMatch.winnerId;
+    nextMatch.participant2 = tournamentMatch.winner;
+    nextMatch.participant2Uucms = tournamentMatch.winnerUucms || '';
+  }
+
+  nextMatch.updatedAt = new Date();
+  await nextMatch.save();
+
+  if (nextMatch.participant1 === 'BYE' || nextMatch.participant2 === 'BYE') {
+    await resolveTournamentByeMatch(nextMatch);
+  }
+}
+
+/**
+ * Resolve BYE matches so winners auto-advance without manual intervention.
+ */
+async function resolveTournamentByeMatch(tournamentMatch) {
+  if (!tournamentMatch || (tournamentMatch.participant1 !== 'BYE' && tournamentMatch.participant2 !== 'BYE')) return false;
+
+  if (tournamentMatch.participant1 === 'BYE' && tournamentMatch.participant2 === 'BYE') {
+    tournamentMatch.winnerId = null;
+    tournamentMatch.winner = null;
+    tournamentMatch.winnerUucms = '';
+    tournamentMatch.score1 = 0;
+    tournamentMatch.score2 = 0;
+    tournamentMatch.status = 'completed';
+    tournamentMatch.updatedAt = new Date();
+    await tournamentMatch.save();
+    return true;
+  }
+
+  const winnerId = tournamentMatch.participant1 === 'BYE' ? tournamentMatch.participant2Id : tournamentMatch.participant1Id;
+  const winner = tournamentMatch.participant1 === 'BYE' ? tournamentMatch.participant2 : tournamentMatch.participant1;
+  const winnerUucms = tournamentMatch.participant1 === 'BYE' ? tournamentMatch.participant2Uucms : tournamentMatch.participant1Uucms;
+
+  if (!winner) return false;
+
+  tournamentMatch.winnerId = winnerId;
+  tournamentMatch.winner = winner;
+  tournamentMatch.winnerUucms = winnerUucms || '';
+  tournamentMatch.score1 = tournamentMatch.participant1 === 'BYE' ? 0 : 1;
+  tournamentMatch.score2 = tournamentMatch.participant2 === 'BYE' ? 0 : 1;
+  tournamentMatch.status = 'completed';
+  tournamentMatch.updatedAt = new Date();
+  await tournamentMatch.save();
+
+  await advanceTournamentWinner(tournamentMatch);
+  return true;
+}
+
+/**
+ * Sync CricketMatch result back to TournamentMatch so bracket progression remains automatic.
+ */
+async function syncTournamentFromCricket(match, req) {
+  if (!match?.tournamentMatchId) return;
+
+  const tournamentMatch = await TournamentMatch.findById(match.tournamentMatchId);
+  if (!tournamentMatch) return;
+
+  const inningsTeamA = match.innings.find((inn) => inn.battingTeam === 'teamA');
+  const inningsTeamB = match.innings.find((inn) => inn.battingTeam === 'teamB');
+
+  const cricketScore1 = {
+    runs: inningsTeamA?.totalRuns ?? null,
+    wickets: inningsTeamA?.totalWickets ?? null,
+    overs: inningsTeamA?.totalOvers || ''
+  };
+  const cricketScore2 = {
+    runs: inningsTeamB?.totalRuns ?? null,
+    wickets: inningsTeamB?.totalWickets ?? null,
+    overs: inningsTeamB?.totalOvers || ''
+  };
+
+  tournamentMatch.cricketScore1 = cricketScore1;
+  tournamentMatch.cricketScore2 = cricketScore2;
+  tournamentMatch.score1 = cricketScore1.runs;
+  tournamentMatch.score2 = cricketScore2.runs;
+  tournamentMatch.cricketResultText = match.result?.resultText || '';
+  tournamentMatch.status = match.status === 'completed'
+    ? 'completed'
+    : (match.status === 'live' ? 'in_progress' : tournamentMatch.status);
+
+  if (match.result?.winner === 'teamA') {
+    tournamentMatch.winnerId = tournamentMatch.participant1Id || match.teamA?.applicationId || null;
+    tournamentMatch.winner = tournamentMatch.participant1 || match.teamA?.name || null;
+    tournamentMatch.winnerUucms = tournamentMatch.participant1Uucms || '';
+  } else if (match.result?.winner === 'teamB') {
+    tournamentMatch.winnerId = tournamentMatch.participant2Id || match.teamB?.applicationId || null;
+    tournamentMatch.winner = tournamentMatch.participant2 || match.teamB?.name || null;
+    tournamentMatch.winnerUucms = tournamentMatch.participant2Uucms || '';
+  } else {
+    tournamentMatch.winnerId = null;
+    tournamentMatch.winner = null;
+    tournamentMatch.winnerUucms = '';
+  }
+
+  tournamentMatch.updatedAt = new Date();
+  await tournamentMatch.save();
+
+  if (tournamentMatch.status === 'completed' && tournamentMatch.winner) {
+    await advanceTournamentWinner(tournamentMatch);
+  }
+
+  if (req?.app) {
+    const io = req.app.get('io');
+    if (io) {
+      emitTournamentMatchUpdate(io, tournamentMatch.tournamentId.toString(), tournamentMatch.toObject());
+    }
+  }
 }
 
 // ============================================================
@@ -522,10 +659,14 @@ exports.recordBall = async (req, res) => {
 
     // Check over completion (6 legal deliveries in this over)
     let overCompleted = false;
+    let completedOverRuns = 0;
+    let completedOverIsMaiden = false;
     if (innings.currentOverBalls >= 6) {
       overCompleted = true;
+      completedOverRuns = innings.currentOverRuns;
+      completedOverIsMaiden = innings.currentOverRuns === 0;
       // Check for maiden
-      if (innings.currentOverRuns === 0) {
+      if (completedOverIsMaiden) {
         bowlerStat.maidens += 1;
       }
       innings.currentOverBalls = 0;
@@ -583,6 +724,9 @@ exports.recordBall = async (req, res) => {
     }
 
     await match.save();
+    if (match.status === 'completed') {
+      await syncTournamentFromCricket(match, req);
+    }
 
     // Create delivery document
     const currentOver = Math.floor((innings.totalBalls - (isLegalDelivery ? 1 : 0)) / 6);
@@ -666,8 +810,8 @@ exports.recordBall = async (req, res) => {
           overSummary: {
             overNumber: currentOver + 1,
             bowlerName: bowlerStat.playerName,
-            runs: innings.currentOverRuns === 0 ? deliveryData.totalRuns : 0, // maiden check happened above
-            isMaiden: innings.currentOverRuns === 0
+            runs: completedOverRuns,
+            isMaiden: completedOverIsMaiden
           },
           timestamp: new Date()
         });
@@ -725,6 +869,9 @@ exports.endOver = async (req, res) => {
 
     match.currentBowlerId = newBowlerId;
     await match.save();
+    if (match.status === 'completed') {
+      await syncTournamentFromCricket(match, req);
+    }
 
     res.json(match);
   } catch (err) {
@@ -797,6 +944,7 @@ exports.undoLastBall = async (req, res) => {
     }
 
     await match.save();
+    await syncTournamentFromCricket(match, req);
 
     // Emit undo event
     const io = req.app.get('io');
@@ -1158,15 +1306,21 @@ exports.createFromTournament = async (req, res) => {
       return res.status(400).json({ error: 'No matches in this tournament' });
     }
 
-    // Check if cricket matches already exist for this tournament
-    const existingCricketMatches = await CricketMatch.find({ tournamentId });
-    if (existingCricketMatches.length > 0) {
-      return res.status(400).json({ error: 'Cricket matches already created for this tournament. Delete them first to regenerate.' });
-    }
+    // Allow incremental generation: only create matches for tournament fixtures that do not yet have a linked cricket match.
+    const existingCricketMatches = await CricketMatch.find({ tournamentId }).select('tournamentMatchId');
+    const existingTournamentMatchIds = new Set(
+      existingCricketMatches
+        .filter((cm) => cm.tournamentMatchId)
+        .map((cm) => String(cm.tournamentMatchId))
+    );
 
     const createdMatches = [];
 
     for (const tMatch of tournamentMatches) {
+      if (existingTournamentMatchIds.has(String(tMatch._id))) {
+        continue;
+      }
+
       // Skip if both teams aren't set (e.g., awaiting results)
       if (!tMatch.participant1 || !tMatch.participant2 || tMatch.participant1 === 'BYE' || tMatch.participant2 === 'BYE') {
         console.log(`⏭️  Skipping tournament match ${tMatch._id} - teams not yet determined`);
@@ -1253,7 +1407,11 @@ exports.createFromTournament = async (req, res) => {
     }
 
     if (createdMatches.length === 0) {
-      return res.status(400).json({ error: 'No cricket matches could be created. Check that all tournament fixtures have participants assigned.' });
+      return res.status(200).json({
+        message: 'No new cricket matches were created. Existing fixtures are already mapped or participants are not ready yet.',
+        createdMatches,
+        tournamentId
+      });
     }
 
     res.status(201).json({
