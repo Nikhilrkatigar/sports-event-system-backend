@@ -1,4 +1,4 @@
-const { CricketMatch, CricketDelivery, Tournament, TournamentMatch } = require('../models');
+const { CricketMatch, CricketDelivery, Tournament, TournamentMatch, Application, Event } = require('../models');
 const { emitTournamentMatchUpdate } = require('../utils/socket');
 
 // ============================================================
@@ -25,12 +25,323 @@ function economy(runs, balls) {
   return parseFloat((runs / overs).toFixed(2));
 }
 
+function countsAsTeamWicket(wicketType) {
+  return wicketType !== 'retired_hurt';
+}
+
+function countsAsBowlerWicket(wicketType) {
+  return !['run_out', 'retired_hurt', 'retired_out'].includes(wicketType);
+}
+
+function dismissalTextForWicket(wicketType, bowlerName, wicketFielder) {
+  switch (wicketType) {
+    case 'bowled':
+      return `b ${bowlerName}`;
+    case 'caught':
+      return wicketFielder
+        ? `c ${wicketFielder} b ${bowlerName}`
+        : `c & b ${bowlerName}`;
+    case 'run_out':
+      return wicketFielder
+        ? `run out (${wicketFielder})`
+        : 'run out';
+    case 'stumped':
+      return `st ${wicketFielder || '?'} b ${bowlerName}`;
+    case 'lbw':
+      return `lbw b ${bowlerName}`;
+    case 'hit_wicket':
+      return `hit wicket b ${bowlerName}`;
+    case 'retired_hurt':
+      return 'retired hurt';
+    case 'retired_out':
+      return 'retired out';
+    default:
+      return wicketType || 'out';
+  }
+}
+
+function createBatsmanStat({ playerName, playerId = '', battingOrder = 0 }) {
+  return {
+    playerName,
+    playerId,
+    runs: 0,
+    ballsFaced: 0,
+    fours: 0,
+    sixes: 0,
+    strikeRate: 0,
+    isOut: false,
+    dismissalType: 'not_out',
+    dismissalBowler: '',
+    dismissalFielder: '',
+    dismissalText: '',
+    battingOrder
+  };
+}
+
+function createBowlerStat({ playerName, playerId = '', bowlingOrder = 0 }) {
+  return {
+    playerName,
+    playerId,
+    oversBowled: 0,
+    ballsBowled: 0,
+    maidens: 0,
+    runsConceded: 0,
+    wickets: 0,
+    noBalls: 0,
+    wides: 0,
+    economy: 0,
+    bowlingOrder
+  };
+}
+
+function resolvePlayerIdentity(teamData, playerId, playerName) {
+  if (playerId !== undefined && playerId !== null && playerId !== '') {
+    const teamPlayer = teamData?.players?.[parseInt(playerId, 10)];
+    return {
+      playerId: String(playerId),
+      playerName: teamPlayer?.name || playerName || ''
+    };
+  }
+
+  if (!playerName) {
+    return { playerId: '', playerName: '' };
+  }
+
+  const resolvedIndex = teamData?.players?.findIndex((player) => player?.name === playerName);
+  return {
+    playerId: resolvedIndex >= 0 ? String(resolvedIndex) : '',
+    playerName
+  };
+}
+
+function ensureBatsmanStat(innings, teamData, playerRef) {
+  const identity = resolvePlayerIdentity(teamData, playerRef?.playerId, playerRef?.playerName);
+  if (!identity.playerName) return null;
+
+  let stat = innings.batsmenStats.find((b) =>
+    (identity.playerId && b.playerId === identity.playerId) || b.playerName === identity.playerName
+  );
+
+  if (!stat) {
+    stat = createBatsmanStat({
+      playerName: identity.playerName,
+      playerId: identity.playerId,
+      battingOrder: innings.batsmenStats.length + 1
+    });
+    innings.batsmenStats.push(stat);
+  }
+
+  return stat;
+}
+
+function ensureBowlerStat(innings, teamData, playerRef) {
+  const identity = resolvePlayerIdentity(teamData, playerRef?.playerId, playerRef?.playerName);
+  if (!identity.playerName) return null;
+
+  let stat = innings.bowlerStats.find((b) =>
+    (identity.playerId && b.playerId === identity.playerId) || b.playerName === identity.playerName
+  );
+
+  if (!stat) {
+    stat = createBowlerStat({
+      playerName: identity.playerName,
+      playerId: identity.playerId,
+      bowlingOrder: innings.bowlerStats.length + 1
+    });
+    innings.bowlerStats.push(stat);
+  }
+
+  return stat;
+}
+
+function swapCurrentBatsmen(match) {
+  const temp = match.currentStrikerId;
+  match.currentStrikerId = match.currentNonStrikerId;
+  match.currentNonStrikerId = temp;
+}
+
+function rebuildInningsFromDeliveries(match, innings, deliveries) {
+  const battingTeamData = match[innings.battingTeam];
+  const bowlingTeamData = match[innings.bowlingTeam];
+  const openingBatsmen = [...(innings.batsmenStats || [])]
+    .sort((a, b) => (a.battingOrder || 0) - (b.battingOrder || 0))
+    .slice(0, 2);
+  const openingBowler = innings.bowlerStats?.[0] || null;
+
+  innings.totalRuns = 0;
+  innings.totalWickets = 0;
+  innings.totalBalls = 0;
+  innings.totalOvers = '0.0';
+  innings.currentOverBalls = 0;
+  innings.currentOverRuns = 0;
+  innings.extras = { wides: 0, noBalls: 0, byes: 0, legByes: 0, penalties: 0 };
+  innings.fallOfWickets = [];
+  innings.partnerships = [{
+    wicketNumber: 0,
+    batsman1Name: openingBatsmen[0]?.playerName || '',
+    batsman2Name: openingBatsmen[1]?.playerName || '',
+    runs: 0,
+    balls: 0
+  }];
+  innings.batsmenStats = openingBatsmen.map((b, index) => createBatsmanStat({
+    playerName: b.playerName,
+    playerId: b.playerId,
+    battingOrder: index + 1
+  }));
+  innings.bowlerStats = openingBowler
+    ? [createBowlerStat({
+        playerName: openingBowler.playerName,
+        playerId: openingBowler.playerId,
+        bowlingOrder: 1
+      })]
+    : [];
+  innings.isCompleted = false;
+
+  match.currentStrikerId = openingBatsmen[0]?.playerId || '';
+  match.currentNonStrikerId = openingBatsmen[1]?.playerId || '';
+  match.currentBowlerId = openingBowler?.playerId || '';
+
+  for (const delivery of deliveries) {
+    const strikerStat = ensureBatsmanStat(innings, battingTeamData, { playerName: delivery.batsmanName });
+    const nonStrikerStat = ensureBatsmanStat(innings, battingTeamData, { playerName: delivery.nonStrikerName });
+    const bowlerStat = ensureBowlerStat(innings, bowlingTeamData, { playerName: delivery.bowlerName });
+    const totalRunsThisBall = Number(delivery.totalRuns || 0);
+    const batterRuns = Number(delivery.runsScored || 0);
+    const isLegalDelivery = !delivery.isWide && !delivery.isNoBall;
+
+    if (strikerStat?.playerId) match.currentStrikerId = strikerStat.playerId;
+    if (nonStrikerStat?.playerId) match.currentNonStrikerId = nonStrikerStat.playerId;
+    if (bowlerStat?.playerId) match.currentBowlerId = bowlerStat.playerId;
+
+    if (strikerStat) {
+      if (!delivery.isWide && !delivery.isBye && !delivery.isLegBye) {
+        strikerStat.runs += batterRuns;
+        if (delivery.isFour) strikerStat.fours += 1;
+        if (delivery.isSix) strikerStat.sixes += 1;
+      }
+      if (!delivery.isWide && !delivery.isNoBall) {
+        strikerStat.ballsFaced += 1;
+      }
+    }
+
+    if (bowlerStat) {
+      if (isLegalDelivery) {
+        bowlerStat.ballsBowled += 1;
+      }
+      if (delivery.isWide) bowlerStat.wides += 1;
+      if (delivery.isNoBall) bowlerStat.noBalls += 1;
+      bowlerStat.runsConceded += totalRunsThisBall;
+    }
+
+    if (delivery.isWide) innings.extras.wides += totalRunsThisBall || 1;
+    else if (delivery.isNoBall) innings.extras.noBalls += 1;
+    else if (delivery.isBye) innings.extras.byes += totalRunsThisBall;
+    else if (delivery.isLegBye) innings.extras.legByes += totalRunsThisBall;
+
+    innings.totalRuns += totalRunsThisBall;
+    innings.currentOverRuns += totalRunsThisBall;
+
+    if (isLegalDelivery) {
+      innings.totalBalls += 1;
+      innings.currentOverBalls += 1;
+    }
+    innings.totalOvers = ballsToOvers(innings.totalBalls);
+
+    const currentPartnership = innings.partnerships[innings.partnerships.length - 1];
+    if (currentPartnership) {
+      currentPartnership.runs += totalRunsThisBall;
+      if (isLegalDelivery) currentPartnership.balls += 1;
+    }
+
+    if (delivery.isWicket && bowlerStat) {
+      const outBatsmanName = delivery.wicketBatsman || delivery.batsmanName;
+      const outStat = ensureBatsmanStat(innings, battingTeamData, { playerName: outBatsmanName });
+      const dismissalType = delivery.wicketType || 'bowled';
+
+      if (outStat) {
+        outStat.isOut = true;
+        outStat.dismissalType = dismissalType;
+        outStat.dismissalBowler = countsAsBowlerWicket(dismissalType) ? bowlerStat.playerName : '';
+        outStat.dismissalFielder = delivery.wicketFielder || '';
+        outStat.dismissalText = dismissalTextForWicket(dismissalType, bowlerStat.playerName, delivery.wicketFielder);
+      }
+
+      if (countsAsBowlerWicket(dismissalType)) {
+        bowlerStat.wickets += 1;
+      }
+
+      if (countsAsTeamWicket(dismissalType)) {
+        innings.totalWickets += 1;
+        innings.fallOfWickets.push({
+          wicketNumber: innings.totalWickets,
+          score: innings.totalRuns,
+          overNumber: innings.totalOvers,
+          batsmanName: outBatsmanName,
+          dismissalText: outStat?.dismissalText || dismissalType
+        });
+      }
+
+      if (delivery.newBatsmanId || delivery.newBatsmanName) {
+        const newBatsmanStat = ensureBatsmanStat(innings, battingTeamData, {
+          playerId: delivery.newBatsmanId,
+          playerName: delivery.newBatsmanName
+        });
+        const outWasStriker = outStat?.playerId && outStat.playerId === strikerStat?.playerId;
+        const remainingBatsmanName = outWasStriker ? nonStrikerStat?.playerName : strikerStat?.playerName;
+
+        innings.partnerships.push({
+          wicketNumber: innings.totalWickets,
+          batsman1Name: remainingBatsmanName || '',
+          batsman2Name: newBatsmanStat?.playerName || '',
+          runs: 0,
+          balls: 0
+        });
+
+        if (outWasStriker) {
+          match.currentStrikerId = newBatsmanStat?.playerId || '';
+        } else {
+          match.currentNonStrikerId = newBatsmanStat?.playerId || '';
+        }
+      }
+    }
+
+    const wicketWithNewBatsman = delivery.isWicket && (delivery.newBatsmanId || delivery.newBatsmanName);
+    if (!delivery.isWide && batterRuns % 2 === 1 && !wicketWithNewBatsman) {
+      swapCurrentBatsmen(match);
+    }
+
+    if (bowlerStat) {
+      bowlerStat.oversBowled = parseFloat(ballsToOvers(bowlerStat.ballsBowled));
+      bowlerStat.economy = economy(bowlerStat.runsConceded, bowlerStat.ballsBowled);
+    }
+
+    if (innings.currentOverBalls >= 6) {
+      if (bowlerStat && innings.currentOverRuns === 0) {
+        bowlerStat.maidens += 1;
+      }
+      innings.currentOverBalls = 0;
+      innings.currentOverRuns = 0;
+      swapCurrentBatsmen(match);
+    }
+  }
+
+  innings.batsmenStats.forEach((b) => {
+    b.strikeRate = strikeRate(b.runs, b.ballsFaced);
+  });
+}
+
 /** Generate a short commentary string for a delivery */
 function generateCommentary(data) {
-  const { batsmanName, bowlerName, runsScored, isWide, isNoBall, isBye, isLegBye, isFour, isSix, isWicket, wicketType, wicketBatsman } = data;
+  const { batsmanName, bowlerName, runsScored, isWide, isNoBall, isBye, isLegBye, isOverthrow, isFour, isSix, isWicket, wicketType, wicketBatsman, overthrowBaseRuns, overthrowRuns } = data;
   if (isWicket) {
     const howOut = wicketType.replace('_', ' ').toUpperCase();
     return `OUT! ${wicketBatsman || batsmanName} is ${howOut}! ${bowlerName} strikes.`;
+  }
+  if (isOverthrow) {
+    if (overthrowRuns > 0) {
+      return `OVERTHROW! ${overthrowBaseRuns}+${overthrowRuns} run${runsScored !== 1 ? 's' : ''} taken.`;
+    }
+    return `OVERTHROW! ${runsScored} run${runsScored !== 1 ? 's' : ''} off the fielding error!`;
   }
   if (isSix) return `SIX! ${batsmanName} launches it over the boundary off ${bowlerName}!`;
   if (isFour) return `FOUR! ${batsmanName} finds the gap off ${bowlerName}.`;
@@ -118,6 +429,118 @@ async function resolveTournamentByeMatch(tournamentMatch) {
 }
 
 /**
+ * Create cricket matches from tournament fixtures that have both participants decided.
+ * Safe to call repeatedly; skips fixtures that are already mapped to a cricket match.
+ */
+async function createCricketMatchesFromTournamentFixtures(tournamentId) {
+  if (!tournamentId) {
+    throw new Error('Tournament ID is required');
+  }
+
+  const tournament = await Tournament.findById(tournamentId).populate('eventId');
+  if (!tournament) {
+    throw new Error('Tournament not found');
+  }
+
+  const event = tournament.eventId;
+  if (!event || event.sportType !== 'cricket') {
+    throw new Error('This tournament is not a cricket event');
+  }
+
+  const tournamentMatches = await TournamentMatch.find({ tournamentId }).sort({ round: 1, matchNumber: 1 });
+  if (tournamentMatches.length === 0) {
+    return [];
+  }
+
+  const existingCricketMatches = await CricketMatch.find({ tournamentId }).select('tournamentMatchId');
+  const existingTournamentMatchIds = new Set(
+    existingCricketMatches
+      .filter((cm) => cm.tournamentMatchId)
+      .map((cm) => String(cm.tournamentMatchId))
+  );
+
+  const createdMatches = [];
+
+  for (const tMatch of tournamentMatches) {
+    if (existingTournamentMatchIds.has(String(tMatch._id))) {
+      continue;
+    }
+
+    if (!tMatch.participant1 || !tMatch.participant2 || tMatch.participant1 === 'BYE' || tMatch.participant2 === 'BYE') {
+      continue;
+    }
+
+    try {
+      const app1 = tMatch.participant1Id ? await Application.findById(tMatch.participant1Id) : null;
+      const app2 = tMatch.participant2Id ? await Application.findById(tMatch.participant2Id) : null;
+
+      const buildPlayerList = (app) => {
+        if (!app || !app.players || app.players.length === 0) {
+          return [
+            { name: 'Player 1', uucms: '', department: '', role: 'batsman', isCaptain: true, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 2', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: true, isPlaying: true },
+            { name: 'Player 3', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 4', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 5', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 6', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 7', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 8', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 9', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 10', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
+            { name: 'Player 11', uucms: '', department: '', role: 'all_rounder', isCaptain: false, isViceCaptain: false, isPlaying: true }
+          ];
+        }
+
+        const mainPlayers = app.players.filter((p) => !p.isSubstitute && p.name).slice(0, 11);
+        return mainPlayers.map((p, idx) => ({
+          name: p.name || `Player ${idx + 1}`,
+          uucms: p.uucms || '',
+          department: p.department || '',
+          role: p.role || 'batsman',
+          isCaptain: idx === 0,
+          isViceCaptain: idx === 1,
+          isPlaying: true
+        }));
+      };
+
+      const cricketMatch = new CricketMatch({
+        eventId: event._id,
+        tournamentId: tournament._id,
+        tournamentMatchId: tMatch._id,
+        teamA: {
+          name: tMatch.participant1,
+          applicationId: tMatch.participant1Id || null,
+          players: buildPlayerList(app1)
+        },
+        teamB: {
+          name: tMatch.participant2,
+          applicationId: tMatch.participant2Id || null,
+          players: buildPlayerList(app2)
+        },
+        oversPerSide: event.cricketOvers || 20,
+        venue: event.venue || '',
+        matchDate: tMatch.scheduledTime ? new Date(tMatch.scheduledTime) : new Date(),
+        currentState: 'not_started',
+        status: 'upcoming'
+      });
+
+      await cricketMatch.save();
+      createdMatches.push({
+        _id: cricketMatch._id,
+        teamA: cricketMatch.teamA.name,
+        teamB: cricketMatch.teamB.name,
+        tournamentRound: tMatch.round,
+        matchNumber: tMatch.matchNumber
+      });
+    } catch (matchError) {
+      console.error(`Error creating cricket match from tournament match ${tMatch._id}:`, matchError.message);
+    }
+  }
+
+  return createdMatches;
+}
+
+/**
  * Sync CricketMatch result back to TournamentMatch so bracket progression remains automatic.
  */
 async function syncTournamentFromCricket(match, req) {
@@ -168,6 +591,26 @@ async function syncTournamentFromCricket(match, req) {
 
   if (tournamentMatch.status === 'completed' && tournamentMatch.winner) {
     await advanceTournamentWinner(tournamentMatch);
+
+    // Auto-create newly unlocked knockout fixtures (semi/final, etc.) in cricket matches.
+    try {
+      const autoCreatedMatches = await createCricketMatchesFromTournamentFixtures(tournamentMatch.tournamentId);
+
+      if (autoCreatedMatches.length > 0 && req?.app) {
+        const io = req.app.get('io');
+        if (io) {
+          io.to(`cricket:${match._id}`).emit('cricket_auto_fixtures_created', {
+            tournamentId: tournamentMatch.tournamentId,
+            sourceMatchId: match._id,
+            createdMatches: autoCreatedMatches,
+            count: autoCreatedMatches.length,
+            timestamp: new Date()
+          });
+        }
+      }
+    } catch (autoCreateErr) {
+      console.error('Auto cricket fixture generation failed:', autoCreateErr.message);
+    }
   }
 
   if (req?.app) {
@@ -424,6 +867,9 @@ exports.recordBall = async (req, res) => {
       isNoBall = false,
       isBye = false,
       isLegBye = false,
+      isOverthrow = false,
+      overthrowBaseRuns = 0,
+      overthrowRuns = 0,
       isWicket = false,
       wicketType = '',
       wicketBatsman = '',
@@ -466,6 +912,8 @@ exports.recordBall = async (req, res) => {
     let totalRunsThisBall = 0;
     let extraRuns = 0;
     let isLegalDelivery = true;
+    let computedOverthrowBaseRuns = 0;
+    let computedOverthrowRuns = 0;
     const isFour = runsScored === 4 && !isBye && !isLegBye;
     const isSix = runsScored === 6 && !isBye && !isLegBye;
 
@@ -485,10 +933,9 @@ exports.recordBall = async (req, res) => {
         innings.extras.noBalls += 1;
         bowlerStat.noBalls += 1;
         bowlerStat.runsConceded += totalRunsThisBall;
-        // Batsman gets runs on no-ball
+        // Batsman gets runs on no-ball, but it does not count as a ball faced.
         if (strikerStat) {
           strikerStat.runs += runsScored;
-          strikerStat.ballsFaced += 1;
           if (isFour) strikerStat.fours += 1;
           if (isSix) strikerStat.sixes += 1;
         }
@@ -506,6 +953,33 @@ exports.recordBall = async (req, res) => {
         innings.extras.legByes += runsScored;
         if (strikerStat) strikerStat.ballsFaced += 1;
         bowlerStat.ballsBowled += 1;
+      } else if (isOverthrow) {
+        // Overthrow runs - capture split as (completed runs + overthrow runs)
+        // Backward compatibility: if split isn't provided, keep old behavior.
+        const parsedBaseRuns = Number(overthrowBaseRuns);
+        const parsedOverthrowRuns = Number(overthrowRuns);
+        const hasExplicitSplit = Number.isFinite(parsedBaseRuns) && Number.isFinite(parsedOverthrowRuns) && (parsedBaseRuns > 0 || parsedOverthrowRuns > 0);
+
+        if (hasExplicitSplit) {
+          computedOverthrowBaseRuns = Math.max(0, parsedBaseRuns);
+          computedOverthrowRuns = Math.max(0, parsedOverthrowRuns);
+          totalRunsThisBall = computedOverthrowBaseRuns + computedOverthrowRuns;
+        } else {
+          totalRunsThisBall = runsScored;
+          computedOverthrowBaseRuns = totalRunsThisBall > 1 ? 1 : 0;
+          computedOverthrowRuns = Math.max(0, totalRunsThisBall - computedOverthrowBaseRuns);
+        }
+
+        isLegalDelivery = true;  // Overthrows happen on a normal legal delivery
+
+        // These runs don't count toward any specific extras category, but are recorded in the delivery.
+        if (strikerStat) {
+          strikerStat.runs += totalRunsThisBall;
+          strikerStat.ballsFaced += 1;
+          if (totalRunsThisBall === 4) strikerStat.fours += 1;
+          if (totalRunsThisBall === 6) strikerStat.sixes += 1;
+        }
+        bowlerStat.runsConceded += totalRunsThisBall;
       } else {
         // Normal delivery
         totalRunsThisBall = runsScored;
@@ -547,69 +1021,39 @@ exports.recordBall = async (req, res) => {
       const outBatsmanName = wicketBatsman || strikerName;
       const outStat = innings.batsmenStats.find(b => b.playerName === outBatsmanName && !b.isOut);
       if (outStat) {
+        const dismissalType = wicketType || 'bowled';
         outStat.isOut = true;
-        outStat.dismissalType = wicketType || 'bowled';
-        outStat.dismissalBowler = bowlerStat.playerName;
+        outStat.dismissalType = dismissalType;
+        outStat.dismissalBowler = countsAsBowlerWicket(dismissalType) ? bowlerStat.playerName : '';
         outStat.dismissalFielder = wicketFielder || '';
+        outStat.dismissalText = dismissalTextForWicket(dismissalType, bowlerStat.playerName, wicketFielder);
 
-        // Generate dismissal text
-        switch (wicketType) {
-          case 'bowled':
-            outStat.dismissalText = `b ${bowlerStat.playerName}`;
-            break;
-          case 'caught':
-            outStat.dismissalText = wicketFielder
-              ? `c ${wicketFielder} b ${bowlerStat.playerName}`
-              : `c & b ${bowlerStat.playerName}`;
-            break;
-          case 'run_out':
-            outStat.dismissalText = wicketFielder
-              ? `run out (${wicketFielder})`
-              : 'run out';
-            outStat.dismissalBowler = '';
-            break;
-          case 'stumped':
-            outStat.dismissalText = `st ${wicketFielder || '?'} b ${bowlerStat.playerName}`;
-            break;
-          case 'lbw':
-            outStat.dismissalText = `lbw b ${bowlerStat.playerName}`;
-            break;
-          case 'hit_wicket':
-            outStat.dismissalText = `hit wicket b ${bowlerStat.playerName}`;
-            break;
-          default:
-            outStat.dismissalText = wicketType || 'out';
-        }
-
-        // Update bowler wickets (exclude run outs)
-        if (wicketType !== 'run_out') {
+        if (countsAsBowlerWicket(dismissalType)) {
           bowlerStat.wickets += 1;
         }
 
-        innings.totalWickets += 1;
-
-        // Fall of wicket
-        innings.fallOfWickets.push({
-          wicketNumber: innings.totalWickets,
-          score: innings.totalRuns,
-          overNumber: innings.totalOvers,
-          batsmanName: outBatsmanName,
-          dismissalText: outStat.dismissalText
-        });
+        if (countsAsTeamWicket(dismissalType)) {
+          innings.totalWickets += 1;
+          innings.fallOfWickets.push({
+            wicketNumber: innings.totalWickets,
+            score: innings.totalRuns,
+            overNumber: innings.totalOvers,
+            batsmanName: outBatsmanName,
+            dismissalText: outStat.dismissalText
+          });
+        }
 
         // Start new partnership if new batsman comes in
-        if (newBatsmanId && innings.totalWickets < 10) {
+        if (newBatsmanId && (!countsAsTeamWicket(dismissalType) || innings.totalWickets < 10)) {
           const newBatsmanPlayer = battingTeamData.players[parseInt(newBatsmanId)];
           if (newBatsmanPlayer) {
             const existingStat = innings.batsmenStats.find(b => b.playerName === newBatsmanPlayer.name);
             if (!existingStat) {
-              innings.batsmenStats.push({
+              innings.batsmenStats.push(createBatsmanStat({
                 playerName: newBatsmanPlayer.name,
                 playerId: newBatsmanId,
-                runs: 0, ballsFaced: 0, fours: 0, sixes: 0, strikeRate: 0,
-                isOut: false, dismissalType: 'not_out',
                 battingOrder: innings.batsmenStats.length + 1
-              });
+              }));
             }
 
             // Determine who stays at crease
@@ -641,11 +1085,12 @@ exports.recordBall = async (req, res) => {
       }
     }
 
-    // Rotate strike on odd runs (only for legal deliveries, non-wide)
-    if (!isWide && isLegalDelivery && runsScored % 2 === 1) {
-      const temp = match.currentStrikerId;
-      match.currentStrikerId = match.currentNonStrikerId;
-      match.currentNonStrikerId = temp;
+    // Rotate strike on odd runs (only for legal deliveries, non-wide).
+    // Skip rotation when a wicket falls and a new batsman has been set — the new
+    // batsman already inherits the correct end; rotating would put them at the wrong end.
+    const wicketWithNewBatsman = isWicket && newBatsmanId;
+    if (!isWide && runsScored % 2 === 1 && !wicketWithNewBatsman) {
+      swapCurrentBatsmen(match);
     }
 
     // Update strike rates for all batsmen
@@ -673,9 +1118,7 @@ exports.recordBall = async (req, res) => {
       innings.currentOverRuns = 0;
 
       // Rotate strike at end of over
-      const temp = match.currentStrikerId;
-      match.currentStrikerId = match.currentNonStrikerId;
-      match.currentNonStrikerId = temp;
+      swapCurrentBatsmen(match);
     }
 
     // Check innings completion: all out or overs done
@@ -739,26 +1182,36 @@ exports.recordBall = async (req, res) => {
       batsmanName: strikerName,
       bowlerName: bowlerStat.playerName,
       nonStrikerName,
-      runsScored,
+      runsScored: isOverthrow ? totalRunsThisBall : runsScored,
       extraRuns,
       totalRuns: totalRunsThisBall,
+      overthrowBaseRuns: isOverthrow ? computedOverthrowBaseRuns : 0,
+      overthrowRuns: isOverthrow ? computedOverthrowRuns : 0,
       isWide,
       isNoBall,
       isBye,
       isLegBye,
+      isOverthrow,
       isFour: isFour && !isBye && !isLegBye,
       isSix: isSix && !isBye && !isLegBye,
       isWicket,
       wicketType: isWicket ? wicketType : '',
       wicketBatsman: isWicket ? (wicketBatsman || strikerName) : '',
       wicketFielder: isWicket ? wicketFielder : '',
+      newBatsmanId: isWicket ? newBatsmanId : '',
+      newBatsmanName: isWicket && newBatsmanId !== ''
+        ? (battingTeamData.players[parseInt(newBatsmanId)]?.name || '')
+        : '',
       teamScore: innings.totalRuns,
       teamWickets: innings.totalWickets,
       oversSoFar: innings.totalOvers,
       commentary: generateCommentary({
         batsmanName: strikerName, bowlerName: bowlerStat.playerName,
-        runsScored, isWide, isNoBall, isBye, isLegBye, isFour, isSix,
-        isWicket, wicketType, wicketBatsman, extraRuns
+        runsScored: isOverthrow ? totalRunsThisBall : runsScored,
+        isWide, isNoBall, isBye, isLegBye, isOverthrow, isFour, isSix,
+        isWicket, wicketType, wicketBatsman, extraRuns,
+        overthrowBaseRuns: isOverthrow ? computedOverthrowBaseRuns : 0,
+        overthrowRuns: isOverthrow ? computedOverthrowRuns : 0
       })
     };
 
@@ -907,40 +1360,21 @@ exports.undoLastBall = async (req, res) => {
     const innings = match.innings.find(i => i.inningNumber === match.currentInning);
     if (!innings) return res.status(400).json({ error: 'No active innings' });
 
-    // Reset innings stats
-    innings.totalRuns = 0;
-    innings.totalWickets = 0;
-    innings.totalBalls = 0;
-    innings.extras = { wides: 0, noBalls: 0, byes: 0, legByes: 0, penalties: 0 };
-    innings.batsmenStats.forEach(b => {
-      b.runs = 0; b.ballsFaced = 0; b.fours = 0; b.sixes = 0;
-      b.strikeRate = 0; b.isOut = false; b.dismissalType = 'not_out';
-      b.dismissalBowler = ''; b.dismissalFielder = ''; b.dismissalText = '';
-    });
-    innings.bowlerStats.forEach(b => {
-      b.oversBowled = 0; b.ballsBowled = 0; b.maidens = 0;
-      b.runsConceded = 0; b.wickets = 0; b.noBalls = 0; b.wides = 0; b.economy = 0;
-    });
-    innings.fallOfWickets = [];
-    innings.isCompleted = false;
+    rebuildInningsFromDeliveries(match, innings, allDeliveries);
 
-    // Replay all remaining deliveries to rebuild state
-    // For simplicity, just use the cumulative snapshot from the last remaining delivery
-    if (allDeliveries.length > 0) {
-      const lastRemaining = allDeliveries[allDeliveries.length - 1];
-      innings.totalRuns = lastRemaining.teamScore;
-      innings.totalWickets = lastRemaining.teamWickets;
-      innings.totalOvers = lastRemaining.oversSoFar;
-      innings.totalBalls = parseInt(lastRemaining.oversSoFar) * 6 + parseInt(lastRemaining.oversSoFar.split('.')[1] || 0);
-    } else {
-      innings.totalOvers = '0.0';
+    // Reopen the active innings after undo.
+    if (match.currentState === 'innings_break' || match.currentState === 'completed' || match.status === 'completed') {
+      match.currentState = match.currentInning === 1 ? 'innings_1' : 'innings_2';
     }
-
-    // Reset match state if it was completed
     if (match.status === 'completed') {
       match.status = 'live';
-      match.currentState = match.currentInning === 1 ? 'innings_1' : 'innings_2';
       match.result = { winner: '', winnerName: '', resultText: '', manOfTheMatch: '' };
+    } else if (match.status !== 'live') {
+      match.status = 'live';
+    }
+
+    if (allDeliveries.length === 0) {
+      innings.totalOvers = '0.0';
     }
 
     await match.save();
@@ -968,6 +1402,11 @@ exports.endInnings = async (req, res) => {
   try {
     const match = await CricketMatch.findById(req.params.id);
     if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    // Guard: if already completed (e.g. auto-completed by recordBall on all-out), just return current state
+    if (match.status === 'completed') {
+      return res.json(match);
+    }
 
     const innings = match.innings.find(i => i.inningNumber === match.currentInning);
     if (!innings) return res.status(400).json({ error: 'No active innings' });
@@ -1005,6 +1444,11 @@ exports.endInnings = async (req, res) => {
 
     await match.save();
 
+    // Sync tournament bracket when 2nd innings ends
+    if (match.status === 'completed') {
+      await syncTournamentFromCricket(match, req);
+    }
+
     const io = req.app.get('io');
     if (io) {
       io.to(`cricket:${match._id}`).emit('cricket_innings_end', {
@@ -1015,6 +1459,13 @@ exports.endInnings = async (req, res) => {
         totalOvers: innings.totalOvers,
         timestamp: new Date()
       });
+      if (match.status === 'completed') {
+        io.to(`cricket:${match._id}`).emit('cricket_match_end', {
+          matchId: match._id,
+          result: match.result,
+          timestamp: new Date()
+        });
+      }
     }
 
     res.json(match);
@@ -1089,6 +1540,9 @@ exports.completeMatch = async (req, res) => {
     match.currentState = 'completed';
     match.status = 'completed';
     await match.save();
+
+    // Sync tournament bracket so the winner advances
+    await syncTournamentFromCricket(match, req);
 
     const io = req.app.get('io');
     if (io) {
@@ -1283,128 +1737,7 @@ exports.getLiveMatches = async (req, res) => {
 exports.createFromTournament = async (req, res) => {
   try {
     const { tournamentId } = req.body;
-    if (!tournamentId) {
-      return res.status(400).json({ error: 'Tournament ID is required' });
-    }
-
-    const { Tournament, TournamentMatch, Application, Event, CricketMatch } = require('../models');
-
-    const tournament = await Tournament.findById(tournamentId).populate('eventId');
-    if (!tournament) {
-      return res.status(404).json({ error: 'Tournament not found' });
-    }
-
-    const event = tournament.eventId;
-    if (!event || event.sportType !== 'cricket') {
-      return res.status(400).json({ error: 'This tournament is not a cricket event' });
-    }
-
-    // Get all tournament matches
-    const tournamentMatches = await TournamentMatch.find({ tournamentId }).sort({ round: 1, matchNumber: 1 });
-
-    if (tournamentMatches.length === 0) {
-      return res.status(400).json({ error: 'No matches in this tournament' });
-    }
-
-    // Allow incremental generation: only create matches for tournament fixtures that do not yet have a linked cricket match.
-    const existingCricketMatches = await CricketMatch.find({ tournamentId }).select('tournamentMatchId');
-    const existingTournamentMatchIds = new Set(
-      existingCricketMatches
-        .filter((cm) => cm.tournamentMatchId)
-        .map((cm) => String(cm.tournamentMatchId))
-    );
-
-    const createdMatches = [];
-
-    for (const tMatch of tournamentMatches) {
-      if (existingTournamentMatchIds.has(String(tMatch._id))) {
-        continue;
-      }
-
-      // Skip if both teams aren't set (e.g., awaiting results)
-      if (!tMatch.participant1 || !tMatch.participant2 || tMatch.participant1 === 'BYE' || tMatch.participant2 === 'BYE') {
-        console.log(`⏭️  Skipping tournament match ${tMatch._id} - teams not yet determined`);
-        continue;
-      }
-
-      try {
-        // Fetch application data for both participants to get squad info
-        const app1 = tMatch.participant1Id ? await Application.findById(tMatch.participant1Id) : null;
-        const app2 = tMatch.participant2Id ? await Application.findById(tMatch.participant2Id) : null;
-
-        // Build player lists from applications or use default
-        const buildPlayerList = (app, teamName) => {
-          if (!app || !app.players || app.players.length === 0) {
-            // Create default player list if no applications
-            return [
-              { name: 'Player 1', uucms: '', department: '', role: 'batsman', isCaptain: true, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 2', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: true, isPlaying: true },
-              { name: 'Player 3', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 4', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 5', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 6', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 7', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 8', uucms: '', department: '', role: 'bowler', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 9', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 10', uucms: '', department: '', role: 'batsman', isCaptain: false, isViceCaptain: false, isPlaying: true },
-              { name: 'Player 11', uucms: '', department: '', role: 'all_rounder', isCaptain: false, isViceCaptain: false, isPlaying: true }
-            ];
-          }
-
-          // Use actual players from application
-          const mainPlayers = app.players.filter(p => !p.isSubstitute && p.name).slice(0, 11);
-          return mainPlayers.map((p, idx) => ({
-            name: p.name || `Player ${idx + 1}`,
-            uucms: p.uucms || '',
-            department: p.department || '',
-            role: p.role || 'batsman',
-            isCaptain: idx === 0,
-            isViceCaptain: idx === 1,
-            isPlaying: true
-          }));
-        };
-
-        const teamAPlayers = buildPlayerList(app1, tMatch.participant1);
-        const teamBPlayers = buildPlayerList(app2, tMatch.participant2);
-
-        // Create cricket match
-        const cricketMatch = new CricketMatch({
-          eventId: event._id,
-          tournamentId: tournament._id,
-          tournamentMatchId: tMatch._id,
-          teamA: {
-            name: tMatch.participant1,
-            applicationId: tMatch.participant1Id || null,
-            players: teamAPlayers
-          },
-          teamB: {
-            name: tMatch.participant2,
-            applicationId: tMatch.participant2Id || null,
-            players: teamBPlayers
-          },
-          oversPerSide: event.cricketOvers || 20,
-          venue: event.venue || '',
-          matchDate: tMatch.scheduledTime ? new Date(tMatch.scheduledTime) : new Date(),
-          currentState: 'not_started',
-          status: 'upcoming'
-        });
-
-        await cricketMatch.save();
-        createdMatches.push({
-          _id: cricketMatch._id,
-          teamA: cricketMatch.teamA.name,
-          teamB: cricketMatch.teamB.name,
-          tournamentRound: tMatch.round,
-          matchNumber: tMatch.matchNumber
-        });
-
-        console.log(`✅ Created cricket match from tournament: ${tMatch.participant1} vs ${tMatch.participant2}`);
-      } catch (matchError) {
-        console.error(`❌ Error creating cricket match from tournament match ${tMatch._id}:`, matchError.message);
-        console.error(`   Details: Participant1=${tMatch.participant1}, Participant2=${tMatch.participant2}`);
-        console.error(`   Stack: ${matchError.stack}`);
-      }
-    }
+    const createdMatches = await createCricketMatchesFromTournamentFixtures(tournamentId);
 
     if (createdMatches.length === 0) {
       return res.status(200).json({
