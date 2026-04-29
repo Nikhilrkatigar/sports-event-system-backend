@@ -1,21 +1,12 @@
 const router = require('express').Router();
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { Settings, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const getClientIp = require('../utils/getClientIp');
+const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/settings';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.get('/', async (req, res) => {
   try {
@@ -45,7 +36,13 @@ router.put('/', auth, requirePermission('manage_settings'), upload.single('colle
         delete data.departments;
       }
     }
-    if (req.file) data.collegeLogo = `/uploads/settings/${req.file.filename}`;
+    if (req.file) {
+      const currentSettings = await Settings.findOne().select('collegeLogo').lean();
+      if (currentSettings?.collegeLogo && !currentSettings.collegeLogo.startsWith('data:') && !currentSettings.collegeLogo.startsWith('http')) {
+        await deleteFromGridFS(currentSettings.collegeLogo);
+      }
+      data.collegeLogo = await uploadFile(req.file);
+    }
     let settings = await Settings.findOne();
     if (!settings) settings = new Settings(data);
     else Object.assign(settings, data);

@@ -269,12 +269,6 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
     }
     innings.totalOvers = ballsToOvers(innings.totalBalls);
 
-    if (isNoBall) {
-      match.isNextBallFreeHit = true;
-    } else if (isLegalDelivery && !isWide) {
-      match.isNextBallFreeHit = false;
-    }
-
     const currentPartnership = innings.partnerships[innings.partnerships.length - 1];
     if (currentPartnership) {
       currentPartnership.runs += totalRunsThisBall;
@@ -935,6 +929,13 @@ exports.recordBall = async (req, res) => {
       return res.status(400).json({ error: 'Penalty runs must be recorded on their own' });
     }
 
+    // Validate new batsman is not already at the crease
+    if (isWicket && newBatsmanId) {
+      if (String(newBatsmanId) === String(match.currentStrikerId) || String(newBatsmanId) === String(match.currentNonStrikerId)) {
+        return res.status(400).json({ error: 'New batsman is already at the crease' });
+      }
+    }
+
     // Current players
     const strikerStat = innings.batsmenStats.find(b => b.playerId === match.currentStrikerId && !b.isOut);
     const bowlerStat = match.currentBowlerId
@@ -1157,6 +1158,13 @@ exports.recordBall = async (req, res) => {
     const wicketWithNewBatsman = isWicket && newBatsmanId;
     if (!isPenaltyDelivery && !isWide && runsScored % 2 === 1 && !wicketWithNewBatsman) {
       swapCurrentBatsmen(match);
+    }
+
+    // ── Free Hit: set after no-ball, clear after the next legal delivery ──
+    if (isNoBall) {
+      match.isNextBallFreeHit = true;
+    } else if (isLegalDelivery && !isWide) {
+      match.isNextBallFreeHit = false;
     }
 
     // Update strike rates for all batsmen

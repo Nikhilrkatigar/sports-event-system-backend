@@ -2,27 +2,18 @@ const router = require('express').Router();
 const XLSX = require('xlsx');
 const QRCode = require('qrcode');
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { Application, Event, AuditLog, Tournament, TournamentMatch, Leaderboard } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { hasFullCmsAccess } = require('../utils/roles');
 const getClientIp = require('../utils/getClientIp');
+const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
 const {
   getMainPlayerCount,
   getRegistrationState,
   syncEventRegistrationStatus
 } = require('../utils/events');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/payment-screenshots';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
 const ALLOWED_SCREENSHOT_MIME_TYPES = new Set(['image/png', 'image/jpeg']);
 const screenshotFileFilter = (req, file, cb) => {
   if (!ALLOWED_SCREENSHOT_MIME_TYPES.has(file.mimetype)) {
@@ -31,7 +22,7 @@ const screenshotFileFilter = (req, file, cb) => {
   }
   cb(null, true);
 };
-const upload = multer({ storage, fileFilter: screenshotFileFilter });
+const upload = multer({ storage: multer.memoryStorage(), fileFilter: screenshotFileFilter });
 const uploadPaymentScreenshot = (req, res, next) => {
   upload.single('screenshot')(req, res, err => {
     if (err) {
@@ -1151,7 +1142,10 @@ router.patch('/:id/upload-payment-screenshot', uploadPaymentScreenshot, async (r
       return res.status(400).json({ message: 'Payment screenshot file required' });
     }
 
-    application.paymentScreenshot = `/uploads/payment-screenshots/${req.file.filename}`;
+    if (application.paymentScreenshot && !application.paymentScreenshot.startsWith('data:')) {
+      await deleteFromGridFS(application.paymentScreenshot);
+    }
+    application.paymentScreenshot = await uploadFile(req.file);
     application.paymentScreenshotUploadedAt = new Date();
     application.paymentStatus = 'pending';
     await application.save();

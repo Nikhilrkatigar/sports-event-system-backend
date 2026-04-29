@@ -1,20 +1,11 @@
 const router = require('express').Router();
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const { Gallery } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
+const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
 
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/gallery';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
-const upload = multer({ storage });
+const upload = multer({ storage: multer.memoryStorage() });
 
 router.get('/', async (req, res) => {
   try {
@@ -26,8 +17,11 @@ router.get('/', async (req, res) => {
 router.post('/', auth, requirePermission('manage_gallery'), upload.single('image'), async (req, res) => {
   try {
     const data = { caption: req.body.caption };
-    if (req.file) data.image = `/uploads/gallery/${req.file.filename}`;
-    else data.image = req.body.imageUrl;
+    if (req.file) {
+      data.image = await uploadFile(req.file);
+    } else {
+      data.image = req.body.imageUrl || '';
+    }
     const item = new Gallery(data);
     await item.save();
     res.status(201).json(item);
@@ -36,7 +30,10 @@ router.post('/', auth, requirePermission('manage_gallery'), upload.single('image
 
 router.delete('/:id', auth, requirePermission('manage_gallery'), async (req, res) => {
   try {
-    await Gallery.findByIdAndDelete(req.params.id);
+    const item = await Gallery.findByIdAndDelete(req.params.id);
+    if (item && item.image && !item.image.startsWith('http')) {
+      await deleteFromGridFS(item.image);
+    }
     res.json({ message: 'Deleted' });
   } catch (err) { res.status(500).json({ message: err.message }); }
 });

@@ -1,26 +1,16 @@
 const router = require('express').Router();
 const multer = require('multer');
-const path = require('path');
-const fs = require('fs');
 const XLSX = require('xlsx');
 const { Event, Application, AuditLog, Tournament } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const getClientIp = require('../utils/getClientIp');
+const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
 const {
   getRegistrationState,
   getNormalizedEventPayload,
   syncEventRegistrationStatus
 } = require('../utils/events');
-
-const storage = multer.diskStorage({
-  destination: (req, file, cb) => {
-    const dir = 'uploads/events';
-    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-    cb(null, dir);
-  },
-  filename: (req, file, cb) => cb(null, Date.now() + path.extname(file.originalname))
-});
 
 // File filter for image validation
 const fileFilter = (req, file, cb) => {
@@ -33,7 +23,7 @@ const fileFilter = (req, file, cb) => {
 };
 
 const upload = multer({
-  storage,
+  storage: multer.memoryStorage(),
   fileFilter,
   limits: {
     fileSize: 1 * 1024 * 1024 // 1MB limit
@@ -223,8 +213,8 @@ router.get('/:id', async (req, res) => {
 router.post('/', auth, requirePermission('manage_events'), uploadFields, async (req, res) => {
   try {
     const data = getNormalizedEventPayload(req.body);
-    if (req.files?.image?.[0]) data.image = `/uploads/events/${req.files.image[0].filename}`;
-    if (req.files?.paymentQRCode?.[0]) data.paymentQRCode = `/uploads/events/${req.files.paymentQRCode[0].filename}`;
+    if (req.files?.image?.[0]) data.image = await uploadFile(req.files.image[0]);
+    if (req.files?.paymentQRCode?.[0]) data.paymentQRCode = await uploadFile(req.files.paymentQRCode[0]);
     if (data.type !== 'team') data.teamSize = 1;
     const event = new Event(data);
     await event.save();
@@ -247,8 +237,20 @@ router.post('/', auth, requirePermission('manage_events'), uploadFields, async (
 router.put('/:id', auth, requirePermission('manage_events'), uploadFields, async (req, res) => {
   try {
     const data = getNormalizedEventPayload(req.body);
-    if (req.files?.image?.[0]) data.image = `/uploads/events/${req.files.image[0].filename}`;
-    if (req.files?.paymentQRCode?.[0]) data.paymentQRCode = `/uploads/events/${req.files.paymentQRCode[0].filename}`;
+    if (req.files?.image?.[0]) {
+      const existing = await Event.findById(req.params.id).select('image').lean();
+      if (existing?.image && !existing.image.startsWith('http') && !existing.image.startsWith('data:')) {
+        await deleteFromGridFS(existing.image);
+      }
+      data.image = await uploadFile(req.files.image[0]);
+    }
+    if (req.files?.paymentQRCode?.[0]) {
+      const existing = await Event.findById(req.params.id).select('paymentQRCode').lean();
+      if (existing?.paymentQRCode && !existing.paymentQRCode.startsWith('http') && !existing.paymentQRCode.startsWith('data:')) {
+        await deleteFromGridFS(existing.paymentQRCode);
+      }
+      data.paymentQRCode = await uploadFile(req.files.paymentQRCode[0]);
+    }
     if (data.type !== 'team') data.teamSize = 1;
     const event = await Event.findByIdAndUpdate(req.params.id, data, { new: true });
     if (!event) return res.status(404).json({ message: 'Event not found' });
