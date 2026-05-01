@@ -116,7 +116,25 @@ app.get('/api/debug/timeline-test', async (req, res) => {
 // MongoDB Connection
 mongoose.connect(process.env.MONGO_URI)
   .then(async () => {
-    console.log('MongoDB connected');
+    const dbName = mongoose.connection.db.databaseName;
+    console.log(`MongoDB connected → database: "${dbName}"`);
+
+    // ── GridFS health check ──
+    // Logs how many uploaded files exist so you can verify data persists across deploys.
+    try {
+      const filesCount = await mongoose.connection.db.collection('uploads.files').countDocuments();
+      const chunksCount = await mongoose.connection.db.collection('uploads.chunks').countDocuments();
+      console.log(`📦 GridFS health: ${filesCount} file(s), ${chunksCount} chunk(s) in "${dbName}"`);
+
+      const Application = require('./models/Application');
+      const withScreenshot = await Application.countDocuments({
+        paymentScreenshot: { $exists: true, $ne: '' }
+      });
+      console.log(`📸 Applications with screenshots: ${withScreenshot}`);
+    } catch (err) {
+      console.warn('GridFS health check skipped:', err.message);
+    }
+
     // Sync Tournament indexes (drops old unique eventId index, creates new compound index)
     try {
       const { Tournament } = require('./models');

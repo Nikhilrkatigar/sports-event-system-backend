@@ -650,6 +650,45 @@ async function syncTournamentFromCricket(match, req) {
 }
 
 // ============================================================
+// Helper: Compute Man of the Match from all innings
+// ============================================================
+function computeManOfTheMatch(match) {
+  let bestBatsman = null;
+  let bestBowler = null;
+  let maxRuns = -1;
+  let maxWickets = -1;
+  let bestEconomy = 999;
+
+  match.innings.forEach(inn => {
+    (inn.batsmenStats || []).forEach(batsman => {
+      if (batsman.runs > maxRuns) {
+        maxRuns = batsman.runs;
+        bestBatsman = batsman.playerName;
+      }
+    });
+    (inn.bowlerStats || []).forEach(bowler => {
+      if (bowler.wickets > maxWickets || (bowler.wickets === maxWickets && bowler.economy < bestEconomy)) {
+        maxWickets = bowler.wickets;
+        bestEconomy = bowler.economy;
+        bestBowler = bowler.playerName;
+      }
+    });
+  });
+
+  let manOfTheMatch = '';
+  if (bestBatsman && maxRuns >= 30) {
+    manOfTheMatch = bestBatsman;
+  } else if (bestBowler && maxWickets >= 2) {
+    manOfTheMatch = bestBowler;
+  } else if (bestBatsman) {
+    manOfTheMatch = bestBatsman;
+  } else if (bestBowler) {
+    manOfTheMatch = bestBowler;
+  }
+  return manOfTheMatch || 'N/A';
+}
+
+// ============================================================
 // ADMIN: Create a new cricket match
 // ============================================================
 exports.createMatch = async (req, res) => {
@@ -1227,6 +1266,8 @@ exports.recordBall = async (req, res) => {
             match.result.resultText = 'Match tied!';
           }
         }
+        // Auto-calculate Man of the Match
+        match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
 
@@ -1241,6 +1282,8 @@ exports.recordBall = async (req, res) => {
         match.result.winnerName = match[innings.battingTeam].name;
         const wicketsLeft = 10 - innings.totalWickets;
         match.result.resultText = `${match[innings.battingTeam].name} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
+        // Auto-calculate Man of the Match
+        match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
 
@@ -1526,6 +1569,8 @@ exports.endInnings = async (req, res) => {
           match.result.winner = 'tie';
           match.result.resultText = 'Match tied!';
         }
+        // Auto-calculate Man of the Match
+        match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
 
