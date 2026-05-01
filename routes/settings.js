@@ -6,7 +6,7 @@ const requirePermission = require('../middleware/requirePermission');
 const getClientIp = require('../utils/getClientIp');
 const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
 
-const upload = multer({ storage: multer.memoryStorage() });
+const upload = multer({ storage: multer.memoryStorage(), limits: { fieldSize: 5 * 1024 * 1024 } });
 
 router.get('/', async (req, res) => {
   try {

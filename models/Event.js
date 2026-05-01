@@ -23,6 +23,7 @@ const eventSchema = new mongoose.Schema({
   // Gender composition requirements
   maleRequired: { type: Number, default: 0 },
   femaleRequired: { type: Number, default: 0 },
+  allowFemaleRequirementShortfall: { type: Boolean, default: false },
   // Gender participation restrictions (empty means all genders allowed)
   allowedGenders: { type: [String], enum: ['male', 'female'], default: ['male', 'female'] },
   // Department restrictions (empty means all departments allowed)

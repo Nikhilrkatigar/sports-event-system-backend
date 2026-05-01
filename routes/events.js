@@ -26,7 +26,8 @@ const upload = multer({
   storage: multer.memoryStorage(),
   fileFilter,
   limits: {
-    fileSize: 1 * 1024 * 1024 // 1MB limit
+    fileSize: 5 * 1024 * 1024, // 5MB file limit
+    fieldSize: 5 * 1024 * 1024 // 5MB field value limit
   }
 });
 
@@ -224,7 +225,10 @@ router.post('/', auth, requirePermission('manage_events'), uploadFields, async (
   } catch (err) {
     // Handle multer errors
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ message: 'File size exceeds 1MB limit' });
+      return res.status(400).json({ message: 'File size exceeds 5MB limit' });
+    }
+    if (err.code === 'LIMIT_FIELD_VALUE') {
+      return res.status(400).json({ message: 'A form field value is too large' });
     }
     if (err.message && err.message.includes('allowed')) {
       return res.status(400).json({ message: err.message });
@@ -261,7 +265,10 @@ router.put('/:id', auth, requirePermission('manage_events'), uploadFields, async
   } catch (err) {
     // Handle multer errors
     if (err.code === 'LIMIT_FILE_SIZE') {
-      return res.status(400).json({ message: 'File size exceeds 1MB limit' });
+      return res.status(400).json({ message: 'File size exceeds 5MB limit' });
+    }
+    if (err.code === 'LIMIT_FIELD_VALUE') {
+      return res.status(400).json({ message: 'A form field value is too large' });
     }
     if (err.message && err.message.includes('allowed')) {
       return res.status(400).json({ message: err.message });

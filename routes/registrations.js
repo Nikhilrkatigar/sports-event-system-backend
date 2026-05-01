@@ -2,7 +2,7 @@ const router = require('express').Router();
 const XLSX = require('xlsx');
 const QRCode = require('qrcode');
 const multer = require('multer');
-const { Application, Event, AuditLog, Tournament, TournamentMatch, Leaderboard } = require('../models');
+const { Application, Event, AuditLog, Tournament, TournamentMatch, Leaderboard, Settings } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { hasFullCmsAccess } = require('../utils/roles');
@@ -22,7 +22,7 @@ const screenshotFileFilter = (req, file, cb) => {
   }
   cb(null, true);
 };
-const upload = multer({ storage: multer.memoryStorage(), fileFilter: screenshotFileFilter });
+const upload = multer({ storage: multer.memoryStorage(), fileFilter: screenshotFileFilter, limits: { fieldSize: 5 * 1024 * 1024 } });
 const uploadPaymentScreenshot = (req, res, next) => {
   upload.single('screenshot')(req, res, err => {
     if (err) {
@@ -212,9 +212,10 @@ router.post('/', async (req, res) => {
     if (!event) return res.status(404).json({ message: 'Event not found' });
 
     // Fetch settings for registration limits
-    const settings = await require('../models').Settings.findOne() || {};
+    const settings = await Settings.findOne() || {};
     const maxSingleEvents = settings.maxSingleEventRegistrations || 2;
     const maxTeamEvents = settings.maxTeamEventRegistrations || 999;
+    const allowSubstitutes = settings.allowSubstitutes !== false; // default to true
 
     const counts = await getEventRegistrationCounts(event._id);
     const registrationState = getRegistrationState(event, counts);
@@ -231,6 +232,15 @@ router.post('/', async (req, res) => {
     }
 
     const normalizedPlayers = players.map((player, index) => normalizePlayerInput(player, index));
+    
+    // Check if substitutes are not allowed
+    if (!allowSubstitutes) {
+      const substituteCount = normalizedPlayers.filter(p => p.isSubstitute).length;
+      if (substituteCount > 0) {
+        return res.status(400).json({ message: 'Substitute players are not allowed for this event' });
+      }
+    }
+    
     const mainPlayers = normalizedPlayers.filter((player) => !player.isSubstitute);
 
     if (String(event.sportType || 'standard').toLowerCase() === 'cricket') {
@@ -274,8 +284,20 @@ router.post('/', async (req, res) => {
     }
 
     if (event.type === 'team') {
-      if (mainPlayers.length !== Number(event.teamSize || 1)) {
-        return res.status(400).json({ message: `Exactly ${event.teamSize} main players are required for this event` });
+      const requiredSize = Number(event.teamSize || 1);
+      if (event.allowFemaleRequirementShortfall) {
+        // With flexible female requirement, allow fewer players but enforce minimum (maleRequired)
+        const minPlayers = Math.max(1, Number(event.maleRequired || 0));
+        if (mainPlayers.length < minPlayers) {
+          return res.status(400).json({ message: `At least ${minPlayers} main players are required (${event.maleRequired} males)` });
+        }
+        if (mainPlayers.length > requiredSize) {
+          return res.status(400).json({ message: `Maximum ${requiredSize} main players are allowed for this event` });
+        }
+      } else {
+        if (mainPlayers.length !== requiredSize) {
+          return res.status(400).json({ message: `Exactly ${event.teamSize} main players are required for this event` });
+        }
       }
       const leaderCount = mainPlayers.filter((player) => player.isTeamLeader).length;
       if (leaderCount !== 1) {
@@ -292,7 +314,7 @@ router.post('/', async (req, res) => {
             message: `This event requires at least ${event.maleRequired} male player(s). You have ${maleCount}.` 
           });
         }
-        if (femaleCount < event.femaleRequired) {
+        if (!event.allowFemaleRequirementShortfall && femaleCount < event.femaleRequired) {
           return res.status(400).json({ 
             message: `This event requires at least ${event.femaleRequired} female player(s). You have ${femaleCount}.` 
           });

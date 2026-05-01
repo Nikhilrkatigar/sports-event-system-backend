@@ -3,6 +3,12 @@ const PUBLIC_EVENT_STATUSES = ['coming_soon', 'published', 'open', 'full', 'clos
 const EVENT_CATEGORIES = ['general', 'track', 'field'];
 const SPORT_TYPES = ['standard', 'cricket'];
 
+const normalizeBoolean = (value) => {
+  if (typeof value === 'boolean') return value;
+  if (typeof value === 'string') return ['true', '1', 'yes', 'on'].includes(value.trim().toLowerCase());
+  return Boolean(value);
+};
+
 const normalizeDate = (value) => {
   if (!value) return null;
   const date = new Date(value);
@@ -77,6 +83,16 @@ const getNormalizedEventPayload = (input = {}) => {
 
   if (payload.teamSize === '' || payload.teamSize == null) delete payload.teamSize;
   else payload.teamSize = Math.max(1, Number(payload.teamSize));
+
+  if (payload.maleRequired === '' || payload.maleRequired == null) delete payload.maleRequired;
+  else payload.maleRequired = Math.max(0, Number(payload.maleRequired));
+
+  if (payload.femaleRequired === '' || payload.femaleRequired == null) delete payload.femaleRequired;
+  else payload.femaleRequired = Math.max(0, Number(payload.femaleRequired));
+
+  if (payload.allowFemaleRequirementShortfall != null) {
+    payload.allowFemaleRequirementShortfall = normalizeBoolean(payload.allowFemaleRequirementShortfall);
+  }
 
   if (payload.fieldAttempts === '' || payload.fieldAttempts == null) delete payload.fieldAttempts;
   else payload.fieldAttempts = Math.min(10, Math.max(1, Number(payload.fieldAttempts)));

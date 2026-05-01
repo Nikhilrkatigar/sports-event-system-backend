@@ -35,6 +35,10 @@ const settingsSchema = new mongoose.Schema({
     default: 5,
     min: 1,
     max: 20
+  },
+  allowSubstitutes: {
+    type: Boolean,
+    default: true
   }
 });
 
