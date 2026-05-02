@@ -923,11 +923,15 @@ exports.recordBall = async (req, res) => {
     const match = await CricketMatch.findById(req.params.id);
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
-    if (!match.currentState.startsWith('innings_')) {
+    const isActiveInnings = match.currentState.startsWith('innings_') || match.currentState === 'super_over_1' || match.currentState === 'super_over_2';
+    if (!isActiveInnings) {
       return res.status(400).json({ error: 'No active innings' });
     }
 
-    const innings = match.innings.find(i => i.inningNumber === match.currentInning);
+    const isSO = match.isSuperOver && (match.currentState === 'super_over_1' || match.currentState === 'super_over_2');
+    const inningsArray = isSO ? match.superOverInnings : match.innings;
+    const inningNum = isSO ? match.superOverNumber : match.currentInning;
+    const innings = inningsArray.find(i => i.inningNumber === inningNum);
     if (!innings || innings.isCompleted) {
       return res.status(400).json({ error: 'Innings not found or completed' });
     }
@@ -1002,6 +1006,7 @@ exports.recordBall = async (req, res) => {
     }
 
     const strikerName = strikerStat?.playerName || 'Out Batsman';
+    const strikerRunsBefore = strikerStat ? strikerStat.runs : 0;
     const nonStrikerStat = innings.batsmenStats.find(b => b.playerId === match.currentNonStrikerId && !b.isOut);
     const nonStrikerName = nonStrikerStat ? nonStrikerStat.playerName : '';
 
@@ -1239,40 +1244,69 @@ exports.recordBall = async (req, res) => {
     }
 
     // Check innings completion: all out or overs done
-    const maxBalls = match.oversPerSide * 6;
+    const maxBalls = isSO ? 6 : match.oversPerSide * 6;
     if (innings.totalWickets >= 10 || innings.totalBalls >= maxBalls) {
       innings.isCompleted = true;
-      if (match.currentInning === 1) {
+      if (isSO) {
+        // Super Over innings completed
+        if (match.superOverNumber === 1) {
+          match.currentState = 'super_over_break';
+        } else {
+          // SO inning 2 done — determine winner from SO scores
+          match.currentState = 'completed';
+          match.status = 'completed';
+          const soInn1 = match.superOverInnings.find(i => i.inningNumber === 1);
+          const soInn2 = match.superOverInnings.find(i => i.inningNumber === 2);
+          if (soInn1 && soInn2) {
+            if (soInn2.totalRuns > soInn1.totalRuns) {
+              match.result.winner = soInn2.battingTeam;
+              match.result.winnerName = match[soInn2.battingTeam].name;
+              match.result.resultText = `${match[soInn2.battingTeam].name} won in Super Over`;
+            } else if (soInn1.totalRuns > soInn2.totalRuns) {
+              match.result.winner = soInn1.battingTeam;
+              match.result.winnerName = match[soInn1.battingTeam].name;
+              match.result.resultText = `${match[soInn1.battingTeam].name} won in Super Over`;
+            } else {
+              match.result.winner = 'tie';
+              match.result.resultText = 'Match tied! (Super Over also tied)';
+            }
+          }
+          match.result.manOfTheMatch = computeManOfTheMatch(match);
+        }
+      } else if (match.currentInning === 1) {
         match.currentState = 'innings_break';
       } else {
-        match.currentState = 'completed';
-        match.status = 'completed';
-        // Determine winner
+        // 2nd innings done — check winner or trigger Super Over on tie
         const inn1 = match.innings.find(i => i.inningNumber === 1);
         const inn2 = match.innings.find(i => i.inningNumber === 2);
         if (inn1 && inn2) {
           if (inn2.totalRuns > inn1.totalRuns) {
+            match.currentState = 'completed';
+            match.status = 'completed';
             match.result.winner = inn2.battingTeam;
             match.result.winnerName = match[inn2.battingTeam].name;
             const wicketsLeft = 10 - inn2.totalWickets;
             match.result.resultText = `${match[inn2.battingTeam].name} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
+            match.result.manOfTheMatch = computeManOfTheMatch(match);
           } else if (inn1.totalRuns > inn2.totalRuns) {
+            match.currentState = 'completed';
+            match.status = 'completed';
             match.result.winner = inn1.battingTeam;
             match.result.winnerName = match[inn1.battingTeam].name;
             const runDiff = inn1.totalRuns - inn2.totalRuns;
             match.result.resultText = `${match[inn1.battingTeam].name} won by ${runDiff} run${runDiff !== 1 ? 's' : ''}`;
+            match.result.manOfTheMatch = computeManOfTheMatch(match);
           } else {
-            match.result.winner = 'tie';
-            match.result.resultText = 'Match tied!';
+            // TIED! Trigger Super Over
+            match.currentState = 'super_over_break';
+            match.isSuperOver = true;
           }
         }
-        // Auto-calculate Man of the Match
-        match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
 
     // Check if 2nd innings team has chased the target
-    if (match.currentInning === 2 && !innings.isCompleted) {
+    if (!isSO && match.currentInning === 2 && !innings.isCompleted) {
       const inn1 = match.innings.find(i => i.inningNumber === 1);
       if (inn1 && innings.totalRuns > inn1.totalRuns) {
         innings.isCompleted = true;
@@ -1282,7 +1316,20 @@ exports.recordBall = async (req, res) => {
         match.result.winnerName = match[innings.battingTeam].name;
         const wicketsLeft = 10 - innings.totalWickets;
         match.result.resultText = `${match[innings.battingTeam].name} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
-        // Auto-calculate Man of the Match
+        match.result.manOfTheMatch = computeManOfTheMatch(match);
+      }
+    }
+
+    // Check if Super Over 2nd innings team has chased the SO target
+    if (isSO && match.superOverNumber === 2 && !innings.isCompleted) {
+      const soInn1 = match.superOverInnings.find(i => i.inningNumber === 1);
+      if (soInn1 && innings.totalRuns > soInn1.totalRuns) {
+        innings.isCompleted = true;
+        match.currentState = 'completed';
+        match.status = 'completed';
+        match.result.winner = innings.battingTeam;
+        match.result.winnerName = match[innings.battingTeam].name;
+        match.result.resultText = `${match[innings.battingTeam].name} won in Super Over`;
         match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
@@ -1292,14 +1339,20 @@ exports.recordBall = async (req, res) => {
       await syncTournamentFromCricket(match, req);
     }
 
+    // Determine milestones
+    const strikerRunsAfter = strikerStat ? strikerStat.runs : strikerRunsBefore;
+    const isFifty = strikerRunsBefore < 50 && strikerRunsAfter >= 50;
+    const isCentury = strikerRunsBefore < 100 && strikerRunsAfter >= 100;
+
     // Create delivery document
     const currentOver = Math.floor((innings.totalBalls - (isLegalDelivery ? 1 : 0)) / 6);
     const currentBall = isLegalDelivery ? innings.currentOverBalls || 6 : 0;
     const deliveryData = {
       matchId: match._id,
-      inningNumber: match.currentInning,
+      inningNumber: isSO ? match.superOverNumber + 2 : match.currentInning,
       overNumber: currentOver,
       ballNumber: isLegalDelivery ? (overCompleted ? 6 : currentBall) : 0,
+      isSuperOverDelivery: isSO,
       batsmanName: strikerName,
       bowlerName: bowlerStat?.playerName || '',
       nonStrikerName,
@@ -1317,6 +1370,8 @@ exports.recordBall = async (req, res) => {
       isOverthrow,
       isFour: isFour && !isBye && !isLegBye,
       isSix: isSix && !isBye && !isLegBye,
+      isFifty,
+      isCentury,
       isWicket,
       wicketType: isWicket ? wicketType : '',
       wicketBatsman: isWicket ? (wicketBatsman || strikerName) : '',
@@ -1403,6 +1458,15 @@ exports.recordBall = async (req, res) => {
           timestamp: new Date()
         });
       }
+
+      // Emit Super Over trigger
+      if (match.currentState === 'super_over_break') {
+        console.log(`🔔 Emitting cricket_super_over to room cricket:${match._id}`);
+        io.to(`cricket:${match._id}`).emit('cricket_super_over', {
+          matchId: match._id,
+          timestamp: new Date()
+        });
+      }
     } else {
       console.warn('⚠️ Socket.IO instance not found on req.app');
     }
@@ -1474,32 +1538,46 @@ exports.undoLastBall = async (req, res) => {
     const match = await CricketMatch.findById(req.params.id);
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
+    const isSO = match.isSuperOver && (match.currentState === 'super_over_1' || match.currentState === 'super_over_2' || match.currentState === 'super_over_break');
+    const deliveryInningNum = isSO ? match.superOverNumber + 2 : match.currentInning;
+
     // Find and delete the last delivery
     const lastDelivery = await CricketDelivery.findOne({
       matchId: match._id,
-      inningNumber: match.currentInning
+      inningNumber: deliveryInningNum
     }).sort({ timestamp: -1 });
 
     if (!lastDelivery) return res.status(400).json({ error: 'No deliveries to undo' });
 
-    // Delete the delivery
     await CricketDelivery.deleteOne({ _id: lastDelivery._id });
 
-    // Rebuild innings from remaining deliveries
     const allDeliveries = await CricketDelivery.find({
       matchId: match._id,
-      inningNumber: match.currentInning
+      inningNumber: deliveryInningNum
     }).sort({ timestamp: 1 });
 
-    const innings = match.innings.find(i => i.inningNumber === match.currentInning);
+    const inningsArray = isSO ? match.superOverInnings : match.innings;
+    const inningNum = isSO ? match.superOverNumber : match.currentInning;
+    const innings = inningsArray.find(i => i.inningNumber === inningNum);
     if (!innings) return res.status(400).json({ error: 'No active innings' });
 
     rebuildInningsFromDeliveries(match, innings, allDeliveries);
 
-    // Reopen the active innings after undo.
-    if (match.currentState === 'innings_break' || match.currentState === 'completed' || match.status === 'completed') {
+    // Reopen the active innings after undo
+    if (isSO) {
+      if (match.currentState === 'super_over_break' || match.currentState === 'completed' || match.status === 'completed') {
+        match.currentState = match.superOverNumber === 1 ? 'super_over_1' : 'super_over_2';
+      }
+    } else if (match.currentState === 'innings_break' || match.currentState === 'super_over_break' || match.currentState === 'completed' || match.status === 'completed') {
       match.currentState = match.currentInning === 1 ? 'innings_1' : 'innings_2';
+      // If we're undoing from super_over_break back to innings_2, clear SO state
+      if (match.isSuperOver && allDeliveries.length >= 0) {
+        match.isSuperOver = false;
+        match.superOverNumber = 0;
+        match.superOverInnings = [];
+      }
     }
+
     if (match.status === 'completed') {
       match.status = 'live';
       match.result = { winner: '', winnerName: '', resultText: '', manOfTheMatch: '' };
@@ -1514,7 +1592,6 @@ exports.undoLastBall = async (req, res) => {
     await match.save();
     await syncTournamentFromCricket(match, req);
 
-    // Emit undo event
     const io = req.app.get('io');
     if (io) {
       io.to(`cricket:${match._id}`).emit('cricket_undo', {
@@ -1537,40 +1614,71 @@ exports.endInnings = async (req, res) => {
     const match = await CricketMatch.findById(req.params.id);
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
-    // Guard: if already completed (e.g. auto-completed by recordBall on all-out), just return current state
+    // Guard: if already completed, just return current state
     if (match.status === 'completed') {
       return res.json(match);
     }
 
-    const innings = match.innings.find(i => i.inningNumber === match.currentInning);
+    const isSO = match.isSuperOver && (match.currentState === 'super_over_1' || match.currentState === 'super_over_2');
+    const inningsArray = isSO ? match.superOverInnings : match.innings;
+    const inningNum = isSO ? match.superOverNumber : match.currentInning;
+    const innings = inningsArray.find(i => i.inningNumber === inningNum);
     if (!innings) return res.status(400).json({ error: 'No active innings' });
 
     innings.isCompleted = true;
 
-    if (match.currentInning === 1) {
+    if (isSO) {
+      // Super Over innings ending
+      if (match.superOverNumber === 1) {
+        match.currentState = 'super_over_break';
+      } else {
+        // SO inning 2 done — determine winner
+        match.currentState = 'completed';
+        match.status = 'completed';
+        const soInn1 = match.superOverInnings.find(i => i.inningNumber === 1);
+        if (soInn1) {
+          if (innings.totalRuns > soInn1.totalRuns) {
+            match.result.winner = innings.battingTeam;
+            match.result.winnerName = match[innings.battingTeam].name;
+            match.result.resultText = `${match[innings.battingTeam].name} won in Super Over`;
+          } else if (soInn1.totalRuns > innings.totalRuns) {
+            match.result.winner = soInn1.battingTeam;
+            match.result.winnerName = match[soInn1.battingTeam].name;
+            match.result.resultText = `${match[soInn1.battingTeam].name} won in Super Over`;
+          } else {
+            match.result.winner = 'tie';
+            match.result.resultText = 'Match tied! (Super Over also tied)';
+          }
+        }
+        match.result.manOfTheMatch = computeManOfTheMatch(match);
+      }
+    } else if (match.currentInning === 1) {
       match.currentState = 'innings_break';
     } else {
-      match.currentState = 'completed';
-      match.status = 'completed';
-      // Determine winner
+      // Regular 2nd innings ending
       const inn1 = match.innings.find(i => i.inningNumber === 1);
       if (inn1) {
         if (innings.totalRuns > inn1.totalRuns) {
+          match.currentState = 'completed';
+          match.status = 'completed';
           match.result.winner = innings.battingTeam;
           match.result.winnerName = match[innings.battingTeam].name;
           const wkts = 10 - innings.totalWickets;
           match.result.resultText = `${match[innings.battingTeam].name} won by ${wkts} wicket${wkts !== 1 ? 's' : ''}`;
+          match.result.manOfTheMatch = computeManOfTheMatch(match);
         } else if (inn1.totalRuns > innings.totalRuns) {
+          match.currentState = 'completed';
+          match.status = 'completed';
           match.result.winner = inn1.battingTeam;
           match.result.winnerName = match[inn1.battingTeam].name;
           const runDiff = inn1.totalRuns - innings.totalRuns;
           match.result.resultText = `${match[inn1.battingTeam].name} won by ${runDiff} run${runDiff !== 1 ? 's' : ''}`;
+          match.result.manOfTheMatch = computeManOfTheMatch(match);
         } else {
-          match.result.winner = 'tie';
-          match.result.resultText = 'Match tied!';
+          // TIED! Trigger Super Over
+          match.currentState = 'super_over_break';
+          match.isSuperOver = true;
         }
-        // Auto-calculate Man of the Match
-        match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
     }
 
@@ -1580,7 +1688,6 @@ exports.endInnings = async (req, res) => {
 
     await match.save();
 
-    // Sync tournament bracket when 2nd innings ends
     if (match.status === 'completed') {
       await syncTournamentFromCricket(match, req);
     }
@@ -1589,7 +1696,7 @@ exports.endInnings = async (req, res) => {
     if (io) {
       io.to(`cricket:${match._id}`).emit('cricket_innings_end', {
         matchId: match._id,
-        inningNumber: match.currentInning,
+        inningNumber: isSO ? match.superOverNumber : match.currentInning,
         totalRuns: innings.totalRuns,
         totalWickets: innings.totalWickets,
         totalOvers: innings.totalOvers,
@@ -1602,10 +1709,130 @@ exports.endInnings = async (req, res) => {
           timestamp: new Date()
         });
       }
+      if (match.currentState === 'super_over_break') {
+        io.to(`cricket:${match._id}`).emit('cricket_super_over', {
+          matchId: match._id,
+          timestamp: new Date()
+        });
+      }
     }
 
     res.json(match);
   } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ============================================================
+// ADMIN: Start a Super Over innings
+// ============================================================
+exports.startSuperOverInnings = async (req, res) => {
+  try {
+    const match = await CricketMatch.findById(req.params.id);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    if (match.currentState !== 'super_over_break') {
+      return res.status(400).json({ error: 'Match is not in Super Over break state' });
+    }
+
+    const { strikerId, nonStrikerId, bowlerId } = req.body;
+    if (!strikerId || !nonStrikerId || !bowlerId) {
+      return res.status(400).json({ error: 'strikerId, nonStrikerId, and bowlerId are required' });
+    }
+    if (strikerId === nonStrikerId) {
+      return res.status(400).json({ error: 'Striker and non-striker must be different' });
+    }
+
+    // Determine which SO inning we're starting
+    const soInningNumber = (match.superOverInnings?.length || 0) === 0 ? 1 : 2;
+
+    // In IPL: team that batted second in the main match bats first in Super Over
+    // SO inning 1: main innings 2 batting team bats
+    // SO inning 2: main innings 1 batting team bats
+    const mainInn2 = match.innings.find(i => i.inningNumber === 2);
+    const mainInn1 = match.innings.find(i => i.inningNumber === 1);
+    let battingTeamKey, bowlingTeamKey;
+    if (soInningNumber === 1) {
+      battingTeamKey = mainInn2?.battingTeam || 'teamB';
+      bowlingTeamKey = mainInn2?.bowlingTeam || 'teamA';
+    } else {
+      battingTeamKey = mainInn1?.battingTeam || 'teamA';
+      bowlingTeamKey = mainInn1?.bowlingTeam || 'teamB';
+    }
+
+    const battingTeamData = match[battingTeamKey];
+    const bowlingTeamData = match[bowlingTeamKey];
+
+    const strikerPlayer = battingTeamData.players[parseInt(strikerId)];
+    const nonStrikerPlayer = battingTeamData.players[parseInt(nonStrikerId)];
+    const bowlerPlayer = bowlingTeamData.players[parseInt(bowlerId)];
+
+    if (!strikerPlayer || !nonStrikerPlayer || !bowlerPlayer) {
+      return res.status(400).json({ error: 'Invalid player selection' });
+    }
+
+    const inningsData = {
+      inningNumber: soInningNumber,
+      battingTeam: battingTeamKey,
+      bowlingTeam: bowlingTeamKey,
+      totalRuns: 0,
+      totalWickets: 0,
+      totalOvers: '0.0',
+      totalBalls: 0,
+      extras: { wides: 0, noBalls: 0, byes: 0, legByes: 0, penalties: 0 },
+      batsmenStats: [
+        createBatsmanStat({ playerName: strikerPlayer.name, playerId: strikerId, battingOrder: 1 }),
+        createBatsmanStat({ playerName: nonStrikerPlayer.name, playerId: nonStrikerId, battingOrder: 2 })
+      ],
+      bowlerStats: [{
+        playerName: bowlerPlayer.name,
+        playerId: bowlerId,
+        oversBowled: 0, ballsBowled: 0, maidens: 0,
+        runsConceded: 0, wickets: 0, noBalls: 0, wides: 0,
+        economy: 0, bowlingOrder: 1
+      }],
+      fallOfWickets: [],
+      partnerships: [
+        {
+          wicketNumber: 0,
+          batsman1Name: strikerPlayer.name,
+          batsman2Name: nonStrikerPlayer.name,
+          runs: 0,
+          balls: 0
+        }
+      ],
+      currentOverBalls: 0,
+      currentOverRuns: 0,
+      isCompleted: false
+    };
+
+    match.superOverInnings.push(inningsData);
+    match.superOverNumber = soInningNumber;
+    match.currentState = soInningNumber === 1 ? 'super_over_1' : 'super_over_2';
+    match.currentStrikerId = strikerId;
+    match.currentNonStrikerId = nonStrikerId;
+    match.currentBowlerId = bowlerId;
+    match.lastCompletedOverBowlerId = '';
+    match.isNextBallFreeHit = false;
+    match.status = 'live';
+
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      io.to(`cricket:${match._id}`).emit('cricket_innings_start', {
+        matchId: match._id,
+        inningNumber: soInningNumber,
+        isSuperOver: true,
+        battingTeam: battingTeamData.name,
+        bowlingTeam: bowlingTeamData.name,
+        timestamp: new Date()
+      });
+    }
+
+    res.json(match);
+  } catch (err) {
+    console.error('startSuperOverInnings error:', err);
     res.status(500).json({ error: err.message });
   }
 };

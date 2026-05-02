@@ -27,9 +27,11 @@ const cricketDeliverySchema = new mongoose.Schema({
   isLegBye: { type: Boolean, default: false },
   isOverthrow: { type: Boolean, default: false },
 
-  // Boundaries
+  // Boundaries and Milestones
   isFour: { type: Boolean, default: false },
   isSix: { type: Boolean, default: false },
+  isFifty: { type: Boolean, default: false },
+  isCentury: { type: Boolean, default: false },
 
   // Wicket
   isWicket: { type: Boolean, default: false },

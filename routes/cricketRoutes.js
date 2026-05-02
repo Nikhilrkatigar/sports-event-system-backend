@@ -11,6 +11,7 @@ router.post('/matches/:id/ball', cricket.recordBall);
 router.post('/matches/:id/end-over', cricket.endOver);
 router.post('/matches/:id/undo', cricket.undoLastBall);
 router.post('/matches/:id/end-innings', cricket.endInnings);
+router.post('/matches/:id/super-over-innings', cricket.startSuperOverInnings);
 router.post('/matches/:id/complete', cricket.completeMatch);
 router.post('/from-tournament', cricket.createFromTournament);
 router.delete('/matches/:id', cricket.deleteMatch);

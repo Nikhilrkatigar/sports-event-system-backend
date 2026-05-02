@@ -125,15 +125,20 @@ const cricketMatchSchema = new mongoose.Schema({
   // Current state tracking
   currentState: {
     type: String,
-    enum: ['not_started', 'toss', 'innings_1', 'innings_break', 'innings_2', 'completed', 'abandoned'],
+    enum: ['not_started', 'toss', 'innings_1', 'innings_break', 'innings_2', 'super_over_break', 'super_over_1', 'super_over_2', 'completed', 'abandoned'],
     default: 'not_started'
   },
-  currentInning: { type: Number, default: 0 },       // 0 = not started, 1 or 2
+  currentInning: { type: Number, default: 0 },       // 0 = not started, 1 or 2 (or 3/4 for super over)
   currentStrikerId: { type: String, default: '' },
   currentNonStrikerId: { type: String, default: '' },
   currentBowlerId: { type: String, default: '' },
   lastCompletedOverBowlerId: { type: String, default: '' },  // bowler of the last completed over (for consecutive-over rule)
   isNextBallFreeHit: { type: Boolean, default: false },       // ICC Free Hit after no-ball
+
+  // Super Over
+  isSuperOver: { type: Boolean, default: false },
+  superOverNumber: { type: Number, default: 0 },              // 0 = not started, 1 or 2
+  superOverInnings: [inningsSchema],                           // Super Over innings (max 2)
 
   // Innings data
   innings: [inningsSchema],
