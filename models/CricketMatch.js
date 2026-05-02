@@ -5,6 +5,7 @@ const cricketPlayerSchema = new mongoose.Schema({
   name: { type: String, required: true },
   uucms: { type: String, default: '' },
   department: { type: String, default: '' },
+  gender: { type: String, enum: ['male', 'female', 'unspecified'], default: 'unspecified' },
   role: { type: String, enum: ['batsman', 'bowler', 'all_rounder', 'wicket_keeper'], default: 'batsman' },
   isCaptain: { type: Boolean, default: false },
   isViceCaptain: { type: Boolean, default: false },

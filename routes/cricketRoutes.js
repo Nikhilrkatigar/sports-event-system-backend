@@ -9,6 +9,8 @@ router.post('/matches/:id/toss', cricket.recordToss);
 router.post('/matches/:id/start-innings', cricket.startInnings);
 router.post('/matches/:id/ball', cricket.recordBall);
 router.post('/matches/:id/end-over', cricket.endOver);
+router.post('/matches/:id/change-bowler', cricket.changeBowler);
+router.post('/matches/:id/resume-batsman', cricket.resumeBatsman);
 router.post('/matches/:id/undo', cricket.undoLastBall);
 router.post('/matches/:id/end-innings', cricket.endInnings);
 router.post('/matches/:id/super-over-innings', cricket.startSuperOverInnings);

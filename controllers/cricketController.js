@@ -226,6 +226,21 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
     if (nonStrikerStat?.playerId) match.currentNonStrikerId = nonStrikerStat.playerId;
     if (bowlerStat?.playerId) match.currentBowlerId = bowlerStat.playerId;
 
+    if (strikerStat && strikerStat.isOut && strikerStat.dismissalType === 'retired_hurt') {
+      strikerStat.isOut = false;
+      strikerStat.dismissalType = 'not_out';
+      strikerStat.dismissalBowler = '';
+      strikerStat.dismissalFielder = '';
+      strikerStat.dismissalText = '';
+    }
+    if (nonStrikerStat && nonStrikerStat.isOut && nonStrikerStat.dismissalType === 'retired_hurt') {
+      nonStrikerStat.isOut = false;
+      nonStrikerStat.dismissalType = 'not_out';
+      nonStrikerStat.dismissalBowler = '';
+      nonStrikerStat.dismissalFielder = '';
+      nonStrikerStat.dismissalText = '';
+    }
+
     if (strikerStat) {
       if (!delivery.isWide && !delivery.isBye && !delivery.isLegBye && !isPenaltyDelivery) {
         strikerStat.runs += batterRuns;
@@ -308,6 +323,15 @@ function rebuildInningsFromDeliveries(match, innings, deliveries) {
           playerId: delivery.newBatsmanId,
           playerName: delivery.newBatsmanName
         });
+        
+        if (newBatsmanStat && newBatsmanStat.isOut && newBatsmanStat.dismissalType === 'retired_hurt') {
+          newBatsmanStat.isOut = false;
+          newBatsmanStat.dismissalType = 'not_out';
+          newBatsmanStat.dismissalBowler = '';
+          newBatsmanStat.dismissalFielder = '';
+          newBatsmanStat.dismissalText = '';
+        }
+
         const outWasStriker = outStat?.playerId && outStat.playerId === strikerStat?.playerId;
         const remainingBatsmanName = outWasStriker ? nonStrikerStat?.playerName : strikerStat?.playerName;
 
@@ -524,6 +548,7 @@ async function createCricketMatchesFromTournamentFixtures(tournamentId) {
           name: p.name || `Player ${idx + 1}`,
           uucms: p.uucms || '',
           department: p.department || '',
+          gender: p.gender || 'unspecified',
           role: p.role || 'batsman',
           isCaptain: idx === 0,
           isViceCaptain: idx === 1,
@@ -649,6 +674,59 @@ async function syncTournamentFromCricket(match, req) {
   }
 }
 
+/**
+ * Revert tournament sync if a match is undone from completed state
+ */
+async function revertTournamentSync(match, req) {
+  if (!match?.tournamentMatchId) return;
+
+  const tournamentMatch = await TournamentMatch.findById(match.tournamentMatchId);
+  if (!tournamentMatch) return;
+
+  // If this match was already progressing someone, revert it
+  if (tournamentMatch.status === 'completed') {
+    tournamentMatch.status = 'in_progress';
+    tournamentMatch.winnerId = null;
+    tournamentMatch.winner = null;
+    tournamentMatch.winnerUucms = '';
+    
+    // Also try to un-advance the winner from the next round if possible
+    const tournament = await Tournament.findById(tournamentMatch.tournamentId);
+    if (tournament && tournament.format === 'single_elimination') {
+      const nextRound = tournamentMatch.round + 1;
+      const nextMatchNumber = Math.ceil(tournamentMatch.matchNumber / 2);
+      const nextMatch = await TournamentMatch.findOne({
+        tournamentId: tournamentMatch.tournamentId,
+        round: nextRound,
+        matchNumber: nextMatchNumber
+      });
+
+      if (nextMatch && nextMatch.status !== 'completed') {
+        if (tournamentMatch.matchNumber % 2 === 1) {
+          nextMatch.participant1Id = null;
+          nextMatch.participant1 = null;
+          nextMatch.participant1Uucms = '';
+        } else {
+          nextMatch.participant2Id = null;
+          nextMatch.participant2 = null;
+          nextMatch.participant2Uucms = '';
+        }
+        await nextMatch.save();
+      }
+    }
+  }
+
+  tournamentMatch.updatedAt = new Date();
+  await tournamentMatch.save();
+
+  if (req?.app) {
+    const io = req.app.get('io');
+    if (io) {
+      emitTournamentMatchUpdate(io, tournamentMatch.tournamentId.toString(), tournamentMatch.toObject());
+    }
+  }
+}
+
 // ============================================================
 // Helper: Compute Man of the Match from all innings
 // ============================================================
@@ -707,6 +785,7 @@ exports.createMatch = async (req, res) => {
           name: p.name,
           uucms: p.uucms || '',
           department: p.department || '',
+          gender: p.gender || 'unspecified',
           role: p.role || 'batsman',
           isCaptain: p.isCaptain || false,
           isViceCaptain: p.isViceCaptain || false,
@@ -720,6 +799,7 @@ exports.createMatch = async (req, res) => {
           name: p.name,
           uucms: p.uucms || '',
           department: p.department || '',
+          gender: p.gender || 'unspecified',
           role: p.role || 'batsman',
           isCaptain: p.isCaptain || false,
           isViceCaptain: p.isViceCaptain || false,
@@ -783,7 +863,9 @@ exports.recordToss = async (req, res) => {
     if (!wonBy || !chose) return res.status(400).json({ error: 'wonBy and chose are required' });
 
     match.toss = { wonBy, chose };
-    match.currentState = 'toss';
+    if (match.currentState === 'not_started') {
+      match.currentState = 'toss';
+    }
     await match.save();
 
     res.json(match);
@@ -966,10 +1048,6 @@ exports.recordBall = async (req, res) => {
 
     if (isWide && isWicket && !WIDE_WICKET_TYPES.has(wicketType)) {
       return res.status(400).json({ error: 'Invalid wicket type on a wide ball' });
-    }
-
-    if (hasPenaltyRuns && (isWide || isNoBall || isBye || isLegBye || isOverthrow || isWicket)) {
-      return res.status(400).json({ error: 'Penalty runs must be recorded on their own' });
     }
 
     // Validate new batsman is not already at the crease
@@ -1571,7 +1649,7 @@ exports.undoLastBall = async (req, res) => {
     } else if (match.currentState === 'innings_break' || match.currentState === 'super_over_break' || match.currentState === 'completed' || match.status === 'completed') {
       match.currentState = match.currentInning === 1 ? 'innings_1' : 'innings_2';
       // If we're undoing from super_over_break back to innings_2, clear SO state
-      if (match.isSuperOver && allDeliveries.length >= 0) {
+      if (match.isSuperOver && allDeliveries.length === 0) {
         match.isSuperOver = false;
         match.superOverNumber = 0;
         match.superOverInnings = [];
@@ -1581,6 +1659,7 @@ exports.undoLastBall = async (req, res) => {
     if (match.status === 'completed') {
       match.status = 'live';
       match.result = { winner: '', winnerName: '', resultText: '', manOfTheMatch: '' };
+      await revertTournamentSync(match, req);
     } else if (match.status !== 'live') {
       match.status = 'live';
     }
@@ -1599,7 +1678,145 @@ exports.undoLastBall = async (req, res) => {
         timestamp: new Date()
       });
     }
+// ============================================================
+// ADMIN: Change bowler mid-over
+// ============================================================
+exports.changeBowler = async (req, res) => {
+  try {
+    const match = await CricketMatch.findById(req.params.id);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
 
+    const { newBowlerId } = req.body;
+    if (!newBowlerId) return res.status(400).json({ error: 'newBowlerId required' });
+
+    const isSO = match.isSuperOver && (match.currentState === 'super_over_1' || match.currentState === 'super_over_2');
+    const inningsArray = isSO ? match.superOverInnings : match.innings;
+    const inningNum = isSO ? match.superOverNumber : match.currentInning;
+    const innings = inningsArray.find(i => i.inningNumber === inningNum);
+
+    if (!innings || innings.isCompleted) return res.status(400).json({ error: 'No active innings' });
+
+    if (String(newBowlerId) === String(match.currentBowlerId)) {
+      return res.status(400).json({ error: 'This bowler is already bowling' });
+    }
+
+    if (String(newBowlerId) === String(match.lastCompletedOverBowlerId)) {
+      return res.status(400).json({ error: 'The same bowler cannot bowl consecutive overs' });
+    }
+
+    const bowlingTeamData = match[innings.bowlingTeam];
+    const bowlerPlayer = bowlingTeamData.players[parseInt(newBowlerId)];
+    if (!bowlerPlayer) return res.status(400).json({ error: 'Invalid bowler index' });
+
+    // Check if this bowler already exists in stats
+    let bowlerStat = innings.bowlerStats.find(b => b.playerId === newBowlerId);
+    if (!bowlerStat) {
+      bowlerStat = {
+        playerName: bowlerPlayer.name,
+        playerId: newBowlerId,
+        oversBowled: 0, ballsBowled: 0, maidens: 0,
+        runsConceded: 0, wickets: 0, noBalls: 0, wides: 0,
+        economy: 0, bowlingOrder: innings.bowlerStats.length + 1
+      };
+      innings.bowlerStats.push(bowlerStat);
+    }
+
+    const maxOversPerBowler = getMaxBowlerOvers(match);
+    if (bowlerStat.ballsBowled >= maxOversPerBowler * 6) {
+      return res.status(400).json({ error: `This bowler has already bowled the maximum of ${maxOversPerBowler} over${maxOversPerBowler !== 1 ? 's' : ''}` });
+    }
+
+    match.currentBowlerId = newBowlerId;
+    await match.save();
+
+    res.json(match);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ============================================================
+// ADMIN: Resume Retired Batsman
+// ============================================================
+exports.resumeBatsman = async (req, res) => {
+  try {
+    const match = await CricketMatch.findById(req.params.id);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    const { batsmanId, replaceOutBatsmanId, fillEmptySpot } = req.body;
+    if (!batsmanId) return res.status(400).json({ error: 'batsmanId required' });
+    if (!replaceOutBatsmanId && !fillEmptySpot) return res.status(400).json({ error: 'Must specify replaceOutBatsmanId or fillEmptySpot' });
+
+    const isSO = match.isSuperOver && (match.currentState === 'super_over_1' || match.currentState === 'super_over_2');
+    const inningsArray = isSO ? match.superOverInnings : match.innings;
+    const inningNum = isSO ? match.superOverNumber : match.currentInning;
+    const innings = inningsArray.find(i => i.inningNumber === inningNum);
+
+    if (!innings || innings.isCompleted) return res.status(400).json({ error: 'No active innings' });
+
+    const retiredStat = innings.batsmenStats.find(b => b.playerId === String(batsmanId) && b.isOut && b.dismissalType === 'retired_hurt');
+    if (!retiredStat) {
+      return res.status(400).json({ error: 'Batsman is not retired hurt or not found' });
+    }
+
+    if (fillEmptySpot) {
+      // Find which spot is empty (striker or non-striker)
+      if (!match.currentStrikerId) {
+        match.currentStrikerId = batsmanId;
+      } else if (!match.currentNonStrikerId) {
+        match.currentNonStrikerId = batsmanId;
+      } else {
+        return res.status(400).json({ error: 'No empty spot available at the crease' });
+      }
+    } else if (replaceOutBatsmanId) {
+      // Make sure the batsman we are replacing is actually out or is currently at the crease to be swapped
+      if (String(match.currentStrikerId) === String(replaceOutBatsmanId)) {
+        match.currentStrikerId = batsmanId;
+      } else if (String(match.currentNonStrikerId) === String(replaceOutBatsmanId)) {
+        match.currentNonStrikerId = batsmanId;
+      } else {
+        return res.status(400).json({ error: 'The batsman to replace is not currently at the crease' });
+      }
+    }
+
+    // Mark them as not out
+    retiredStat.isOut = false;
+    retiredStat.dismissalType = 'not_out';
+    retiredStat.dismissalBowler = '';
+    retiredStat.dismissalFielder = '';
+    retiredStat.dismissalText = '';
+
+    // We should remove their fall of wicket entry
+    innings.fallOfWickets = innings.fallOfWickets.filter(fow => fow.batsmanName !== retiredStat.playerName);
+
+    // Create a new partnership with whoever is at the other end
+    const otherBatsmanId = match.currentStrikerId === batsmanId ? match.currentNonStrikerId : match.currentStrikerId;
+    const otherBatsmanName = innings.batsmenStats.find(b => b.playerId === String(otherBatsmanId))?.playerName || '';
+    
+    innings.partnerships.push({
+      wicketNumber: innings.totalWickets,
+      batsman1Name: otherBatsmanName,
+      batsman2Name: retiredStat.playerName,
+      runs: 0,
+      balls: 0
+    });
+
+    await match.save();
+
+    const io = req.app.get('io');
+    if (io) {
+      // Just emit a generic update to refresh clients
+      io.to(`cricket:${match._id}`).emit('cricket_ball_update', {
+         matchId: match._id,
+         timestamp: new Date()
+      });
+    }
+
+    res.json(match);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
     res.json({ match, undoneDelivery: lastDelivery });
   } catch (err) {
     res.status(500).json({ error: err.message });
