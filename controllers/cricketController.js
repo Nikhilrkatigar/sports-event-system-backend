@@ -15,9 +15,77 @@ function ballsToOvers(balls) {
 const WIDE_WICKET_TYPES = new Set(['run_out', 'stumped', 'hit_wicket', 'obstructing_field']);
 const FREE_HIT_WICKET_TYPES = new Set(['run_out', 'obstructing_field']);
 
-function getMaxBowlerOvers(match) {
+// ── Mixed-gender match helpers ──────────────────────────────
+// A match is "mixed" when the batting team has both male and female players.
+function isMixedGenderMatch(match, innings) {
+  if (!innings) return false;
+  const team = match[innings.battingTeam];
+  if (!team?.players) return false;
+  const genders = team.players.filter(p => p.isPlaying && p.gender && p.gender !== 'unspecified').map(p => p.gender);
+  return genders.includes('male') && genders.includes('female');
+}
+
+// Girls bowl overs 1-2, boys bowl overs 3-7.
+// currentOverNumber = Math.floor(totalBalls / 6)  → 0-indexed completed overs
+// During over N (0-indexed), currentOverNumber = N while balls are being bowled.
+function expectedBowlerGender(completedOvers) {
+  // completedOvers = innings.totalBalls / 6 floored = overs fully completed so far
+  // The NEXT over to bowl is completedOvers (0-indexed).
+  // Overs 0 and 1 (= overs 1 and 2 in human terms) → female
+  return completedOvers < 2 ? 'female' : 'male';
+}
+
+// Return counts of girl and boy wickets fallen in an innings
+function genderWicketCounts(match, innings) {
+  const battingTeamPlayers = match[innings.battingTeam]?.players || [];
+  let girlWickets = 0;
+  let boyWickets = 0;
+  for (const stat of innings.batsmenStats || []) {
+    if (!stat.isOut || stat.dismissalType === 'retired_hurt') continue;
+    const playerIdx = parseInt(stat.playerId, 10);
+    const player = battingTeamPlayers[playerIdx];
+    const gender = player?.gender || 'unspecified';
+    if (gender === 'female') girlWickets++;
+    else boyWickets++;
+  }
+  return { girlWickets, boyWickets };
+}
+
+// Detect whether a mixed match is currently in the girls phase (overs 1-2)
+// Girls phase ends when 2 overs completed OR 2 girl wickets fall, whichever first.
+function isGirlsPhase(match, innings) {
+  if (!isMixedGenderMatch(match, innings)) return false;
+  const completedOvers = Math.floor(innings.totalBalls / 6);
+  if (completedOvers >= 2) return false; // overs 1-2 done
+  const { girlWickets } = genderWicketCounts(match, innings);
+  if (girlWickets >= 2) return false; // girls all out
+  return true;
+}
+
+// Max overs a bowler may bowl — gender-aware for mixed matches:
+//   female bowler: max 1 over (out of 2 girls overs)
+//   male bowler: max 2 overs (out of 5 boys overs)
+//   non-mixed: original formula
+function getMaxBowlerOvers(match, innings, bowlerPlayerId) {
+  if (innings && isMixedGenderMatch(match, innings) && bowlerPlayerId !== undefined) {
+    const bowlingTeamPlayers = match[innings.bowlingTeam]?.players || [];
+    const idx = parseInt(bowlerPlayerId, 10);
+    const player = bowlingTeamPlayers[idx];
+    if (player?.gender === 'female') return 1;
+    if (player?.gender === 'male') return 2;
+  }
   const oversPerSide = Number(match?.oversPerSide || 20);
   return Math.max(1, Math.ceil(oversPerSide / 5));
+}
+
+// Max team wickets before all-out — gender-aware for mixed matches:
+//   During girls phase: 2 girl wickets = girls all out (boys phase starts)
+//   During boys phase: 4 boy wickets = boys all out (innings over)
+//   Total innings all-out = 6 wickets (last batsman standing rule: 8-2 = 6)
+//   Non-mixed: 10 wickets (11-1)
+function getMaxInningsWickets(match, innings) {
+  if (!innings || !isMixedGenderMatch(match, innings)) return 10;
+  return 6; // 2 girl + 4 boy
 }
 
 /** Compute strike rate */
@@ -515,6 +583,11 @@ async function createCricketMatchesFromTournamentFixtures(tournamentId) {
 
   for (const tMatch of tournamentMatches) {
     if (existingTournamentMatchIds.has(String(tMatch._id))) {
+      continue;
+    }
+
+    // Skip matches that were manually completed (winner declared without cricket scoring)
+    if (tMatch.status === 'completed' && tMatch.winner) {
       continue;
     }
 
@@ -1321,9 +1394,37 @@ exports.recordBall = async (req, res) => {
       swapCurrentBatsmen(match);
     }
 
+    // ── Mixed match: detect girls phase ending mid-over ──────────────────────
+    // When 2 girl wickets fall (girls all out), even mid-over, immediately
+    // jump to over 3: clear current over balls, reset bowler, swap batsmen to boys.
+    let girlsPhaseEndedMidOver = false;
+    if (!isSO && isMixedGenderMatch(match, innings) && !innings.isCompleted) {
+      const { girlWickets } = genderWicketCounts(match, innings);
+      const completedOvers = Math.floor(innings.totalBalls / 6);
+      if (girlWickets >= 2 && completedOvers < 2) {
+        // Girls all out before 2 overs completed — skip remaining balls in this over
+        // and pad totalBalls so completedOvers becomes 2 (start of over 3)
+        const ballsToSkip = (2 * 6) - innings.totalBalls;
+        if (ballsToSkip > 0) {
+          innings.totalBalls = 2 * 6;
+          innings.totalOvers = '2.0';
+        }
+        innings.currentOverBalls = 0;
+        innings.currentOverRuns = 0;
+        match.lastCompletedOverBowlerId = match.currentBowlerId || match.lastCompletedOverBowlerId;
+        match.currentBowlerId = '';
+        // Clear current batsmen IDs — frontend will need to pick boys batsmen
+        match.currentStrikerId = '';
+        match.currentNonStrikerId = '';
+        girlsPhaseEndedMidOver = true;
+        overCompleted = true; // signal end-over modal on frontend
+      }
+    }
+
     // Check innings completion: all out or overs done
     const maxBalls = isSO ? 6 : match.oversPerSide * 6;
-    if (innings.totalWickets >= 10 || innings.totalBalls >= maxBalls) {
+    const maxWickets = isSO ? 10 : getMaxInningsWickets(match, innings);
+    if (innings.totalWickets >= maxWickets || innings.totalBalls >= maxBalls) {
       innings.isCompleted = true;
       if (isSO) {
         // Super Over innings completed
@@ -1363,7 +1464,8 @@ exports.recordBall = async (req, res) => {
             match.status = 'completed';
             match.result.winner = inn2.battingTeam;
             match.result.winnerName = match[inn2.battingTeam].name;
-            const wicketsLeft = 10 - inn2.totalWickets;
+            const maxWk2 = getMaxInningsWickets(match, inn2);
+            const wicketsLeft = maxWk2 - inn2.totalWickets;
             match.result.resultText = `${match[inn2.battingTeam].name} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
             match.result.manOfTheMatch = computeManOfTheMatch(match);
           } else if (inn1.totalRuns > inn2.totalRuns) {
@@ -1392,7 +1494,8 @@ exports.recordBall = async (req, res) => {
         match.status = 'completed';
         match.result.winner = innings.battingTeam;
         match.result.winnerName = match[innings.battingTeam].name;
-        const wicketsLeft = 10 - innings.totalWickets;
+        const maxWkChase = getMaxInningsWickets(match, innings);
+        const wicketsLeft = maxWkChase - innings.totalWickets;
         match.result.resultText = `${match[innings.battingTeam].name} won by ${wicketsLeft} wicket${wicketsLeft !== 1 ? 's' : ''}`;
         match.result.manOfTheMatch = computeManOfTheMatch(match);
       }
@@ -1491,6 +1594,7 @@ exports.recordBall = async (req, res) => {
           currentNonStrikerId: match.currentNonStrikerId,
           currentBowlerId: match.currentBowlerId,
           overCompleted,
+          girlsPhaseEndedMidOver,
           inningsCompleted: innings.isCompleted,
           matchCompleted: match.status === 'completed',
           result: match.result
@@ -1578,6 +1682,17 @@ exports.endOver = async (req, res) => {
     const bowlerPlayer = bowlingTeamData.players[parseInt(newBowlerId)];
     if (!bowlerPlayer) return res.status(400).json({ error: 'Invalid bowler index' });
 
+    // ── Mixed match: enforce gender bowling rules ─────────────────────────────
+    if (isMixedGenderMatch(match, innings)) {
+      const completedOvers = Math.floor(innings.totalBalls / 6);
+      const required = expectedBowlerGender(completedOvers);
+      const bowlerGender = bowlerPlayer.gender || 'unspecified';
+      if (bowlerGender !== 'unspecified' && bowlerGender !== required) {
+        const phaseLabel = required === 'female' ? 'Girls\' phase (overs 1-2)' : 'Boys\' phase (overs 3-7)';
+        return res.status(400).json({ error: `${phaseLabel}: only ${required} bowlers allowed for this over` });
+      }
+    }
+
     // Check if this bowler already exists in stats
     let bowlerStat = innings.bowlerStats.find(b => b.playerId === newBowlerId);
     if (!bowlerStat) {
@@ -1591,7 +1706,7 @@ exports.endOver = async (req, res) => {
       innings.bowlerStats.push(bowlerStat);
     }
 
-    const maxOversPerBowler = getMaxBowlerOvers(match);
+    const maxOversPerBowler = getMaxBowlerOvers(match, innings, newBowlerId);
     if (bowlerStat.ballsBowled >= maxOversPerBowler * 6) {
       return res.status(400).json({ error: `This bowler has already bowled the maximum of ${maxOversPerBowler} over${maxOversPerBowler !== 1 ? 's' : ''}` });
     }
@@ -1767,7 +1882,7 @@ exports.changeBowler = async (req, res) => {
       innings.bowlerStats.push(bowlerStat);
     }
 
-    const maxOversPerBowler = getMaxBowlerOvers(match);
+    const maxOversPerBowler = getMaxBowlerOvers(match, innings, newBowlerId);
     if (bowlerStat.ballsBowled >= maxOversPerBowler * 6) {
       return res.status(400).json({ error: `This bowler has already bowled the maximum of ${maxOversPerBowler} over${maxOversPerBowler !== 1 ? 's' : ''}` });
     }
