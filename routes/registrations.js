@@ -22,7 +22,7 @@ const screenshotFileFilter = (req, file, cb) => {
   }
   cb(null, true);
 };
-const upload = multer({ storage: multer.memoryStorage(), fileFilter: screenshotFileFilter, limits: { fileSize: 5 * 1024 * 1024, fieldSize: 5 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), fileFilter: screenshotFileFilter, limits: { fileSize: 5 * 1024 * 1024, fieldSize: 15 * 1024 * 1024 } });
 const uploadPaymentScreenshot = (req, res, next) => {
   upload.single('screenshot')(req, res, err => {
     if (err) {

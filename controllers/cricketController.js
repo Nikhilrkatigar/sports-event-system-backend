@@ -1678,6 +1678,13 @@ exports.undoLastBall = async (req, res) => {
         timestamp: new Date()
       });
     }
+
+    res.json(match);
+  } catch (error) {
+    console.error('Error undoing last ball:', error);
+    res.status(500).json({ error: error.message });
+  }
+};
 // ============================================================
 // ADMIN: Change bowler mid-over
 // ============================================================
@@ -1813,11 +1820,6 @@ exports.resumeBatsman = async (req, res) => {
     }
 
     res.json(match);
-  } catch (err) {
-    res.status(500).json({ error: err.message });
-  }
-};
-    res.json({ match, undoneDelivery: lastDelivery });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }
