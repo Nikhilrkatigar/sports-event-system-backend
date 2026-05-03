@@ -16,6 +16,7 @@ router.post('/matches/:id/end-innings', cricket.endInnings);
 router.post('/matches/:id/super-over-innings', cricket.startSuperOverInnings);
 router.post('/matches/:id/complete', cricket.completeMatch);
 router.post('/from-tournament', cricket.createFromTournament);
+router.post('/matches/:id/restart', cricket.restartMatch);
 router.delete('/matches/:id', cricket.deleteMatch);
 
 // ── Public read endpoints ──

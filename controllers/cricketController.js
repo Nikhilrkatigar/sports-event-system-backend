@@ -2200,6 +2200,40 @@ exports.deleteMatch = async (req, res) => {
 };
 
 // ============================================================
+// ADMIN: Restart match — wipe all scoring, keep teams & overs
+// ============================================================
+exports.restartMatch = async (req, res) => {
+  try {
+    const match = await CricketMatch.findById(req.params.id);
+    if (!match) return res.status(404).json({ error: 'Match not found' });
+
+    // Delete all delivery records for this match
+    await CricketDelivery.deleteMany({ matchId: match._id });
+
+    // Reset all match state back to not_started, keep teams/overs/venue/dates
+    match.toss = { wonBy: '', chose: '' };
+    match.currentState = 'not_started';
+    match.status = 'upcoming';
+    match.currentInning = 0;
+    match.currentStrikerId = '';
+    match.currentNonStrikerId = '';
+    match.currentBowlerId = '';
+    match.lastCompletedOverBowlerId = '';
+    match.isNextBallFreeHit = false;
+    match.isSuperOver = false;
+    match.superOverNumber = 0;
+    match.superOverInnings = [];
+    match.innings = [];
+    match.result = { winner: '', winnerName: '', resultText: '', manOfTheMatch: '' };
+
+    await match.save();
+    res.json(match);
+  } catch (err) {
+    res.status(500).json({ error: err.message });
+  }
+};
+
+// ============================================================
 // PUBLIC: List all cricket matches
 // ============================================================
 exports.listMatches = async (req, res) => {
