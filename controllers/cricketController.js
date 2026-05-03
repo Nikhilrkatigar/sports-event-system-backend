@@ -1564,7 +1564,7 @@ exports.endOver = async (req, res) => {
     const match = await CricketMatch.findById(req.params.id);
     if (!match) return res.status(404).json({ error: 'Match not found' });
 
-    const { newBowlerId } = req.body;
+    const { newBowlerId, newStrikerId, newNonStrikerId } = req.body;
     if (!newBowlerId) return res.status(400).json({ error: 'newBowlerId required' });
 
     const innings = match.innings.find(i => i.inningNumber === match.currentInning);
@@ -1597,6 +1597,45 @@ exports.endOver = async (req, res) => {
     }
 
     match.currentBowlerId = newBowlerId;
+
+    // Optional batsman rotation for mixed matches: swap striker and/or non-striker
+    const battingTeamData = match[innings.battingTeam];
+    if (newStrikerId !== undefined && newStrikerId !== null && newStrikerId !== '') {
+      const newStriker = battingTeamData.players[parseInt(newStrikerId)];
+      if (!newStriker) return res.status(400).json({ error: 'Invalid new striker index' });
+      // Add to batsmenStats if not already there
+      const existingStat = innings.batsmenStats.find(b => b.playerId === String(newStrikerId));
+      if (!existingStat) {
+        innings.batsmenStats.push({
+          playerName: newStriker.name,
+          playerId: String(newStrikerId),
+          runs: 0, ballsFaced: 0, fours: 0, sixes: 0,
+          strikeRate: 0, isOut: false, dismissalType: 'not_out',
+          battingOrder: innings.batsmenStats.length + 1
+        });
+      } else if (existingStat.isOut) {
+        return res.status(400).json({ error: `${newStriker.name} is already out and cannot bat again` });
+      }
+      match.currentStrikerId = String(newStrikerId);
+    }
+    if (newNonStrikerId !== undefined && newNonStrikerId !== null && newNonStrikerId !== '') {
+      const newNonStriker = battingTeamData.players[parseInt(newNonStrikerId)];
+      if (!newNonStriker) return res.status(400).json({ error: 'Invalid new non-striker index' });
+      const existingStat = innings.batsmenStats.find(b => b.playerId === String(newNonStrikerId));
+      if (!existingStat) {
+        innings.batsmenStats.push({
+          playerName: newNonStriker.name,
+          playerId: String(newNonStrikerId),
+          runs: 0, ballsFaced: 0, fours: 0, sixes: 0,
+          strikeRate: 0, isOut: false, dismissalType: 'not_out',
+          battingOrder: innings.batsmenStats.length + 1
+        });
+      } else if (existingStat.isOut) {
+        return res.status(400).json({ error: `${newNonStriker.name} is already out and cannot bat again` });
+      }
+      match.currentNonStrikerId = String(newNonStrikerId);
+    }
+
     await match.save();
     if (match.status === 'completed') {
       await syncTournamentFromCricket(match, req);
