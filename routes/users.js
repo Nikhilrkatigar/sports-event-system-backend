@@ -63,4 +63,29 @@ router.post('/', auth, requirePermission('manage_users'), async (req, res) => {
   }
 });
 
+router.delete('/:id', auth, requirePermission('manage_users'), async (req, res) => {
+  try {
+    const user = await Admin.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+
+    if (String(user._id) === String(req.admin?._id)) {
+      return res.status(400).json({ message: 'You cannot delete your own account' });
+    }
+
+    await Admin.findByIdAndDelete(user._id);
+
+    await AuditLog.create({
+      action: `User Deleted: ${user.name} (${getCanonicalRole(user.role)})`,
+      admin: req.admin.name,
+      ip: getClientIp(req)
+    });
+
+    res.json({ message: 'User deleted successfully' });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+});
+
 module.exports = router;
