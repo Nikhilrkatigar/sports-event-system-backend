@@ -213,8 +213,9 @@ router.post('/', async (req, res) => {
 
     // Fetch settings for registration limits
     const settings = await Settings.findOne() || {};
-    const maxSingleEvents = settings.maxSingleEventRegistrations || 2;
-    const maxTeamEvents = settings.maxTeamEventRegistrations || 999;
+    const maxSingleEvents = Number(settings.maxSingleEventRegistrations) || 2;
+    const maxTeamEvents = Number(settings.maxTeamEventRegistrations) || 999;
+    const teamEventsAreUnlimited = maxTeamEvents === 999;
     const allowSubstitutes = settings.allowSubstitutes !== false; // default to true
 
     const counts = await getEventRegistrationCounts(event._id);
@@ -254,6 +255,30 @@ router.post('/', async (req, res) => {
       return res.status(400).json({ message: 'At least one main player is required' });
     }
 
+    const participantUucms = mainPlayers.map((player) => player.uucms);
+    const participantApplications = await Application.find({
+      'players.uucms': { $in: participantUucms },
+      'players.isSubstitute': { $ne: true },
+      eventId: { $ne: eventId }
+    }).populate('eventId', 'type');
+
+    const registrationCountsByUucms = new Map(
+      participantUucms.map((uucms) => [uucms, { single: 0, team: 0 }])
+    );
+
+    participantApplications.forEach((application) => {
+      const eventType = application.eventId?.type;
+      if (eventType !== 'single' && eventType !== 'team') return;
+
+      (application.players || []).forEach((player) => {
+        if (player.isSubstitute) return;
+        const normalizedUucms = normalizeUucms(player.uucms);
+        const counts = registrationCountsByUucms.get(normalizedUucms);
+        if (!counts) return;
+        counts[eventType] += 1;
+      });
+    });
+
     // Check department restrictions
     if (Array.isArray(event.allowedDepartments) && event.allowedDepartments.length > 0) {
       const invalidDepts = mainPlayers
@@ -284,6 +309,18 @@ router.post('/', async (req, res) => {
     }
 
     if (event.type === 'team') {
+      const blockedPlayer = mainPlayers.find((player) => {
+        const counts = registrationCountsByUucms.get(player.uucms);
+        return counts && counts.team >= maxTeamEvents;
+      });
+
+      if (blockedPlayer) {
+        const blockedCount = registrationCountsByUucms.get(blockedPlayer.uucms)?.team || 0;
+        return res.status(400).json({
+          message: `Player ${blockedPlayer.name} (${blockedPlayer.uucms}) has already registered for ${blockedCount} team event(s). Maximum allowed is ${maxTeamEvents} team events.`
+        });
+      }
+
       const requiredSize = Number(event.teamSize || 1);
       if (event.allowFemaleRequirementShortfall) {
         // With flexible female requirement, allow fewer players but enforce minimum (maleRequired)
@@ -331,17 +368,12 @@ router.post('/', async (req, res) => {
 
       // Check single-player event limit (configurable from CMS)
       const mainPlayer = mainPlayers[0];
-      const playerApplications = await Application.find({
-        'players.uucms': mainPlayer.uucms,
-        'players.isSubstitute': { $ne: true },
-        eventId: { $ne: eventId }
-      }).populate('eventId', 'type');
-
-      const singleEventCount = playerApplications.filter(app => app.eventId?.type === 'single').length;
+      const playerCounts = registrationCountsByUucms.get(mainPlayer.uucms) || { single: 0, team: 0 };
+      const singleEventCount = playerCounts.single;
       
       if (singleEventCount >= maxSingleEvents) {
         return res.status(400).json({ 
-          message: `Player ${mainPlayer.name} (${mainPlayer.uucms}) has already registered for ${singleEventCount} single-player event(s). Maximum allowed is ${maxSingleEvents} single-player events. Team events are ${maxTeamEvents === 999 ? 'unlimited' : maxTeamEvents + ' maximum'}.`
+          message: `Player ${mainPlayer.name} (${mainPlayer.uucms}) has already registered for ${singleEventCount} individual event(s). Maximum allowed is ${maxSingleEvents} single-player events.${teamEventsAreUnlimited ? ' Team events are unlimited.' : ` Maximum allowed is ${maxTeamEvents} team events.`}`
         });
       }
     }
