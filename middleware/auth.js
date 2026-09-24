@@ -7,6 +7,7 @@ module.exports = async (req, res, next) => {
 
   try {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    if (decoded.type !== 'admin') return res.status(401).json({ message: 'Invalid token' });
     const admin = await Admin.findById(decoded.id).select('name email role');
     if (!admin) return res.status(401).json({ message: 'Invalid token' });
     req.admin = {

@@ -4,6 +4,7 @@ const cors = require('cors');
 const path = require('path');
 const http = require('http');
 const socketIo = require('socket.io');
+const rateLimit = require('express-rate-limit');
 require('dotenv').config();
 
 // Suppress util._extend deprecation warning from dependencies
@@ -17,6 +18,8 @@ process.on('warning', (warning) => {
 const { setupSocketHandlers } = require('./utils/socket');
 
 const app = express();
+// Number of reverse proxies in front of the API (Render = 1); makes req.ip the real client IP
+app.set('trust proxy', Number(process.env.TRUST_PROXY || 0));
 const server = http.createServer(app);
 const io = socketIo(server, {
   cors: {
@@ -74,8 +77,55 @@ app.use(cors({
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
-app.use(express.json());
+app.use(express.json({ limit: '100kb' }));
 app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Security headers (the subset of helmet this API needs; CORP left off so the
+// frontend on another origin can still load /api/images)
+app.use((req, res, next) => {
+  res.set({
+    'X-Content-Type-Options': 'nosniff',
+    'X-Frame-Options': 'DENY',
+    'Referrer-Policy': 'no-referrer',
+    'Strict-Transport-Security': 'max-age=15552000; includeSubDomains'
+  });
+  next();
+});
+
+// Never send internal error details (DB/schema messages, stacks) to clients; log them instead
+app.use((req, res, next) => {
+  const json = res.json.bind(res);
+  res.json = (body) => {
+    if (res.statusCode >= 500) {
+      console.error(`${req.method} ${req.originalUrl} ->`, body);
+      return json({ message: 'Internal server error' });
+    }
+    return json(body);
+  };
+  next();
+});
+
+// Rate-limit public (unauthenticated) write endpoints
+const publicWriteLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { message: 'Too many requests. Please slow down.' }
+});
+app.post([
+  '/api/registrations',
+  '/api/events/:id/like',
+  '/api/events/:id/interested',
+  '/api/events/:id/share',
+  '/api/tournaments/:id/like',
+  '/api/tournaments/:id/interested',
+  '/api/leaderboard/public/hype-create'
+], publicWriteLimiter);
+app.patch([
+  '/api/registrations/:id/upload-payment-screenshot',
+  '/api/leaderboard/:id/hype'
+], publicWriteLimiter);
 
 // Routes
 app.use('/api/images', require('./routes/images'));
@@ -92,25 +142,16 @@ app.use('/api/tournaments', require('./routes/tournaments'));
 app.use('/api/timeline', require('./routes/timeline'));
 app.use('/api/messages', require('./routes/messages'));
 app.use('/api/cricket', require('./routes/cricketRoutes'));
-app.get('/api/health', (req, res) => res.json({ status: 'ok' }));
-app.get('/api/debug/models', (req, res) => {
-  const { TimelineItem } = require('./models');
-  res.json({
-    TimelineItemType: typeof TimelineItem,
-    TimelineItemName: TimelineItem?.modelName,
-    TimelineItemCollection: TimelineItem?.collection?.name,
-    TimelineItemSchemaKeys: Object.keys(TimelineItem?.schema?.paths || {})
-  });
+// Reports 503 when the database is down so uptime monitors notice
+app.get('/api/health', (req, res) => {
+  const dbUp = mongoose.connection.readyState === 1;
+  res.status(dbUp ? 200 : 503).json({ status: dbUp ? 'ok' : 'db_down' });
 });
-app.get('/api/debug/timeline-test', async (req, res) => {
-  try {
-    const { TimelineItem } = require('./models');
-    const count = await TimelineItem.countDocuments();
-    const sample = await TimelineItem.findOne().lean();
-    res.json({ success: true, count, sample });
-  } catch (err) {
-    res.status(500).json({ error: err.message, stack: err.stack });
-  }
+
+// JSON errors for anything thrown in middleware (multer file checks, CORS, bad JSON)
+app.use((err, req, res, next) => {
+  const status = err.status || err.statusCode || (err.name === 'MulterError' ? 400 : 500);
+  res.status(status).json({ message: status < 500 ? err.message : 'Internal server error' });
 });
 
 // MongoDB Connection
@@ -148,3 +189,11 @@ mongoose.connect(process.env.MONGO_URI)
 
 const PORT = process.env.PORT || 5003;
 server.listen(PORT, () => console.log(`Server running on port ${PORT}`));
+
+// Render's free plan sleeps after 15 min without traffic (~50s cold start). Render sets
+// RENDER_EXTERNAL_URL, so ping ourselves through the public URL every 10 min to stay awake.
+if (process.env.RENDER_EXTERNAL_URL) {
+  setInterval(() => {
+    fetch(`${process.env.RENDER_EXTERNAL_URL}/api/health`).catch(() => {});
+  }, 10 * 60 * 1000);
+}

@@ -377,19 +377,16 @@ router.get('/public/unscored/:eventId', async (req, res) => {
     
     // Get all registrations for this event
     const applications = await Application.find({ eventId }).populate('eventId', 'title type');
-    
+    // One query for every name already on the leaderboard (was one query per registration)
+    const scoredNames = new Set(await Leaderboard.distinct('teamOrPlayer', { eventId }));
+
     // Build list of unscored athletes (registrations that don't have leaderboard entries yet)
     const unscored = [];
     for (const app of applications) {
       // For team events
       if (event.type === 'team') {
         const teamName = app.teamName || app.teamId;
-        const inLeaderboard = await Leaderboard.findOne({ 
-          eventId, 
-          teamOrPlayer: teamName 
-        });
-        
-        if (!inLeaderboard) {
+        if (!scoredNames.has(teamName)) {
           const genders = app.players
             .filter(p => !p.isSubstitute)
             .map(p => p.gender || 'unspecified');
@@ -412,12 +409,7 @@ router.get('/public/unscored/:eventId', async (req, res) => {
           if (player.isSubstitute) continue;
           
           const displayName = player.uucms ? `${player.name} (${player.uucms})` : player.name;
-          const inLeaderboard = await Leaderboard.findOne({ 
-            eventId, 
-            teamOrPlayer: displayName 
-          });
-          
-          if (!inLeaderboard) {
+          if (!scoredNames.has(displayName)) {
             unscored.push({
               _id: `temp-${displayName}-${eventId}`,
               eventId: app.eventId,
@@ -441,11 +433,27 @@ router.get('/public/unscored/:eventId', async (req, res) => {
 // Public endpoint: Create leaderboard entry from hype (no auth required)
 router.post('/public/hype-create', async (req, res) => {
   try {
-    const { eventId, teamOrPlayer, gender } = req.body;
+    const { eventId, gender } = req.body;
+    const teamOrPlayer = String(req.body.teamOrPlayer || '');
     if (!eventId || !teamOrPlayer) {
       return res.status(400).json({ message: 'Event and player/team are required' });
     }
-    
+
+    // Only allow entries for someone actually registered in this event (single events use "Name (UUCMS)")
+    const nameWithUucms = teamOrPlayer.match(/^(.*) \(([^()]+)\)$/);
+    const registered = await Application.exists({
+      eventId: String(eventId),
+      $or: [
+        { teamName: teamOrPlayer },
+        { teamId: teamOrPlayer },
+        { 'players.name': teamOrPlayer },
+        ...(nameWithUucms ? [{ players: { $elemMatch: { name: nameWithUucms[1], uucms: nameWithUucms[2] } } }] : [])
+      ]
+    });
+    if (!registered) {
+      return res.status(400).json({ message: 'No registration found for this player/team' });
+    }
+
     // Check if entry already exists
     const existing = await Leaderboard.findOne({ eventId, teamOrPlayer });
     if (existing) {

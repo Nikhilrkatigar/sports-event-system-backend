@@ -29,8 +29,14 @@ const applicationSchema = new mongoose.Schema({
   verifiedByAdmin: { type: mongoose.Schema.Types.ObjectId, ref: 'Admin' },
   paymentScreenshot: { type: String, default: '' },
   paymentScreenshotUploadedAt: { type: Date },
+  uploadToken: { type: String, select: false },
   createdAt: { type: Date, default: Date.now }
 });
+
+// Hot paths on registration day: per-event counts, UUCMS limit checks, private-screenshot lookup on every image load
+applicationSchema.index({ eventId: 1 });
+applicationSchema.index({ 'players.uucms': 1 });
+applicationSchema.index({ paymentScreenshot: 1 });
 
 // Pre-save hook to normalize UUCMS to uppercase
 applicationSchema.pre('save', function(next) {

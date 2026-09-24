@@ -1,4 +1,5 @@
 const router = require('express').Router();
+const crypto = require('crypto');
 const XLSX = require('xlsx');
 const QRCode = require('qrcode');
 const multer = require('multer');
@@ -7,7 +8,7 @@ const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const { hasFullCmsAccess } = require('../utils/roles');
 const getClientIp = require('../utils/getClientIp');
-const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
+const { uploadFile, deleteFromGridFS, signImageAccess } = require('../utils/fileUploads');
 const {
   getMainPlayerCount,
   getRegistrationState,
@@ -456,6 +457,8 @@ router.post('/', async (req, res) => {
     }
     
     application.registrationNumber = regNumber;
+    // Proves ownership for the follow-up payment screenshot upload
+    application.uploadToken = crypto.randomBytes(24).toString('hex');
 
     await application.save();
     await syncEventRegistrationStatus(event, {
@@ -465,7 +468,7 @@ router.post('/', async (req, res) => {
 
     // Populate eventId with payment details for response
     const result = await Application.findById(application._id).populate('eventId', 'title type status registrationFee paymentQRCode upiPaymentLink');
-    res.status(201).json(result);
+    res.status(201).json({ ...result.toObject(), uploadToken: application.uploadToken });
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -481,10 +484,11 @@ router.get('/player/:uucms', async (req, res) => {
       return res.status(400).json({ message: 'UUCMS is required' });
     }
 
+    // Only what the register page needs to count existing registrations — no player PII
     const applications = await Application.find({
       'players.uucms': normalizedUucms,
       'players.isSubstitute': { $ne: true }
-    }).populate('eventId', 'title type status date');
+    }).select('_id eventId').populate('eventId', 'title type status date');
 
     res.json(applications);
   } catch (err) {
@@ -534,20 +538,17 @@ router.get('/', auth, requirePermission('view_registrations'), async (req, res) 
     const applications = await Application.find(query)
       .populate('eventId', 'title type status registrationFee')
       .populate('verifiedByAdmin', 'name')
-      .sort({ createdAt: -1 });
+      .sort({ createdAt: -1 })
+      .lean();
+
+    // Screenshots are private: hand admins a short-lived signed link instead of the bare file id
+    applications.forEach((app) => {
+      if (app.paymentScreenshot && /^[a-f\d]{24}$/i.test(app.paymentScreenshot)) {
+        app.paymentScreenshot += `?sig=${signImageAccess(app.paymentScreenshot)}`;
+      }
+    });
 
     res.json(applications);
-  } catch (err) {
-    res.status(500).json({ message: err.message });
-  }
-});
-
-// Public: Get registration by ID (for QR display)
-router.get('/public/:id', async (req, res) => {
-  try {
-    const app = await Application.findById(req.params.id).populate('eventId', 'title');
-    if (!app) return res.status(404).json({ message: 'Registration not found' });
-    res.json(app);
   } catch (err) {
     res.status(500).json({ message: err.message });
   }
@@ -1189,9 +1190,12 @@ router.patch('/:id/unverify-payment', auth, requirePermission('manage_registrati
 // User: Upload payment screenshot proof
 router.patch('/:id/upload-payment-screenshot', uploadPaymentScreenshot, async (req, res) => {
   try {
-    const application = await Application.findById(req.params.id).populate('eventId', 'title registrationFee paymentQRCode upiPaymentLink');
+    const application = await Application.findById(req.params.id).select('+uploadToken').populate('eventId', 'title registrationFee paymentQRCode upiPaymentLink');
     if (!application) return res.status(404).json({ message: 'Registration not found' });
-    
+    if (!application.uploadToken || String(req.body.uploadToken || '') !== application.uploadToken) {
+      return res.status(403).json({ message: 'Not allowed to upload for this registration' });
+    }
+
     if (!req.file) {
       return res.status(400).json({ message: 'Payment screenshot file required' });
     }

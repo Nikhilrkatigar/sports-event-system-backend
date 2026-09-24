@@ -32,7 +32,7 @@ router.post('/login', authLimiter, async (req, res) => {
       return res.status(500).json({ message: 'Server auth configuration missing (JWT_SECRET)' });
     }
 
-    const token = jwt.sign({ id: admin._id, name: admin.name, email: admin.email, role: admin.role }, process.env.JWT_SECRET, { expiresIn: '24h' });
+    const token = jwt.sign({ id: admin._id, type: 'admin', name: admin.name, email: admin.email, role: admin.role }, process.env.JWT_SECRET, { expiresIn: '8h' });
 
     await AuditLog.create({ action: 'Admin Login', admin: admin.name, ip: getClientIp(req) });
 

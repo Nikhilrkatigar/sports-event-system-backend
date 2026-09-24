@@ -10,4 +10,6 @@ const leaderboardSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now }
 });
 
+leaderboardSchema.index({ eventId: 1, teamOrPlayer: 1 });
+
 module.exports = mongoose.model('Leaderboard', leaderboardSchema);

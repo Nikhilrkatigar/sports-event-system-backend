@@ -3,9 +3,9 @@ const multer = require('multer');
 const { Gallery } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
-const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
+const { uploadFile, deleteFromGridFS, imageFileFilter } = require('../utils/fileUploads');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, fieldSize: 15 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), fileFilter: imageFileFilter, limits: { fileSize: 5 * 1024 * 1024, fieldSize: 15 * 1024 * 1024 } });
 
 router.get('/', async (req, res) => {
   try {

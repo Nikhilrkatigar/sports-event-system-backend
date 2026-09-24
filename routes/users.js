@@ -70,7 +70,7 @@ router.delete('/:id', auth, requirePermission('manage_users'), async (req, res) 
       return res.status(404).json({ message: 'User not found' });
     }
 
-    if (String(user._id) === String(req.admin?._id)) {
+    if (String(user._id) === String(req.admin.id)) {
       return res.status(400).json({ message: 'You cannot delete your own account' });
     }
 

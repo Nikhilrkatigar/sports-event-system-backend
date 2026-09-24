@@ -5,26 +5,16 @@ const { Event, Application, AuditLog, Tournament } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const getClientIp = require('../utils/getClientIp');
-const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
+const { uploadFile, deleteFromGridFS, imageFileFilter } = require('../utils/fileUploads');
 const {
   getRegistrationState,
   getNormalizedEventPayload,
   syncEventRegistrationStatus
 } = require('../utils/events');
 
-// File filter for image validation
-const fileFilter = (req, file, cb) => {
-  const allowedMimes = ['image/jpeg', 'image/png', 'image/webp', 'image/gif'];
-  if (allowedMimes.includes(file.mimetype)) {
-    cb(null, true);
-  } else {
-    cb(new Error('Only JPEG, PNG, WebP, and GIF images are allowed'), false);
-  }
-};
-
 const upload = multer({
   storage: multer.memoryStorage(),
-  fileFilter,
+  fileFilter: imageFileFilter,
   limits: {
     fileSize: 5 * 1024 * 1024, // 5MB file limit
     fieldSize: 15 * 1024 * 1024 // 15MB field value limit

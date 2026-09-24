@@ -4,9 +4,9 @@ const { Settings, AuditLog } = require('../models');
 const auth = require('../middleware/auth');
 const requirePermission = require('../middleware/requirePermission');
 const getClientIp = require('../utils/getClientIp');
-const { uploadFile, deleteFromGridFS } = require('../utils/fileUploads');
+const { uploadFile, deleteFromGridFS, imageFileFilter } = require('../utils/fileUploads');
 
-const upload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 5 * 1024 * 1024, fieldSize: 15 * 1024 * 1024 } });
+const upload = multer({ storage: multer.memoryStorage(), fileFilter: imageFileFilter, limits: { fileSize: 5 * 1024 * 1024, fieldSize: 15 * 1024 * 1024 } });
 
 router.get('/', async (req, res) => {
   try {
@@ -17,7 +17,7 @@ router.get('/', async (req, res) => {
     res.json(settings);
   } catch (err) {
     console.error('Settings GET error:', err.stack);
-    res.status(500).json({ message: err.message, error: err.toString() });
+    res.status(500).json({ message: err.message });
   }
 });
 

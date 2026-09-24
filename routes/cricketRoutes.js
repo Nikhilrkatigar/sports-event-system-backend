@@ -1,23 +1,27 @@
 const express = require('express');
 const router = express.Router();
 const cricket = require('../controllers/cricketController');
+const auth = require('../middleware/auth');
+const requirePermission = require('../middleware/requirePermission');
 
-// ── Admin endpoints (protected by auth middleware in production) ──
-router.post('/matches', cricket.createMatch);
-router.put('/matches/:id', cricket.updateMatch);
-router.post('/matches/:id/toss', cricket.recordToss);
-router.post('/matches/:id/start-innings', cricket.startInnings);
-router.post('/matches/:id/ball', cricket.recordBall);
-router.post('/matches/:id/end-over', cricket.endOver);
-router.post('/matches/:id/change-bowler', cricket.changeBowler);
-router.post('/matches/:id/resume-batsman', cricket.resumeBatsman);
-router.post('/matches/:id/undo', cricket.undoLastBall);
-router.post('/matches/:id/end-innings', cricket.endInnings);
-router.post('/matches/:id/super-over-innings', cricket.startSuperOverInnings);
-router.post('/matches/:id/complete', cricket.completeMatch);
-router.post('/from-tournament', cricket.createFromTournament);
-router.post('/matches/:id/restart', cricket.restartMatch);
-router.delete('/matches/:id', cricket.deleteMatch);
+const admin = [auth, requirePermission('manage_tournaments')];
+
+// ── Admin endpoints ──
+router.post('/matches', admin, cricket.createMatch);
+router.put('/matches/:id', admin, cricket.updateMatch);
+router.post('/matches/:id/toss', admin, cricket.recordToss);
+router.post('/matches/:id/start-innings', admin, cricket.startInnings);
+router.post('/matches/:id/ball', admin, cricket.recordBall);
+router.post('/matches/:id/end-over', admin, cricket.endOver);
+router.post('/matches/:id/change-bowler', admin, cricket.changeBowler);
+router.post('/matches/:id/resume-batsman', admin, cricket.resumeBatsman);
+router.post('/matches/:id/undo', admin, cricket.undoLastBall);
+router.post('/matches/:id/end-innings', admin, cricket.endInnings);
+router.post('/matches/:id/super-over-innings', admin, cricket.startSuperOverInnings);
+router.post('/matches/:id/complete', admin, cricket.completeMatch);
+router.post('/from-tournament', admin, cricket.createFromTournament);
+router.post('/matches/:id/restart', admin, cricket.restartMatch);
+router.delete('/matches/:id', admin, cricket.deleteMatch);
 
 // ── Public read endpoints ──
 router.get('/live', cricket.getLiveMatches);
